@@ -3,6 +3,7 @@ import AppKit
 // Writing to a Claude CLI pipe after the process exits must raise an error, not kill the app.
 signal(SIGPIPE, SIG_IGN)
 SelfTest.runIfRequested()
+DoctorCLI.runIfRequested()
 
 MainActor.assumeIsolated {
     let app = NSApplication.shared

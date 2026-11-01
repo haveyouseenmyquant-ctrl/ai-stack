@@ -1,0 +1,23 @@
+name: Laptop Doctor safety suite
+on:
+  push:
+    branches: [laptop-doctor]
+  pull_request:
+    paths: ["Sources/AIStack/Doctor/**", "shared/**", "tests/safety/**", "fixtures/**", ".github/workflows/doctor.yml"]
+  workflow_dispatch:
+jobs:
+  macos:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      - name: Safety suite
+        env: { CI: "true" }
+        run: python3 tests/safety/run_safety.py --bin .build/debug/AIStack --work "$RUNNER_TEMP/doctor" --out doctor-results.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doctor-results-macos
+          path: doctor-results.json
