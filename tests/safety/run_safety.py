@@ -6,7 +6,7 @@
 Every write goes to fixtures under --work. Prints one line per test and writes doctor-results.json:
   safety {passed,total,tests}, planted {found,total,missing}, tier1 {freed,eligible}, unapprovedDestructive.
 """
-import argparse, glob, hashlib, json, os, random, shutil, signal, stat, subprocess, sys, time, traceback
+import argparse, glob, hashlib, json, os, random, shutil, signal, stat, subprocess, sys, time, traceback, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -44,13 +44,28 @@ def sha(p):
     return h.hexdigest()
 
 
+def zip_members(path, prefix):
+    """The doctor's archive of an opted-in folder, as virtual entries: bytes only (times live in the journal)."""
+    snap = {}
+    with zipfile.ZipFile(path) as z:
+        for m in z.infolist():
+            if not m.is_dir() and not m.filename.startswith("__MACOSX/"):
+                snap[prefix + "/" + m.filename] = (hashlib.sha256(z.read(m)).hexdigest(), None, None)
+    return snap
+
+
 def snapshot(home, skip_trash=False):
+    """rel path -> (sha256, mtime us, birthtime us). Our temp siblings (.ld-) are skipped (see leftovers);
+    the archive of ARCHIVE counts as the files it holds, so a folder in a verified zip is not 'missing'."""
     snap = {}
     for root, dirs, files in os.walk(home):
         for f in files:
             p = os.path.join(root, f)
             rel = os.path.relpath(p, home).replace(os.sep, "/")
-            if skip_trash and rel.startswith(".Trash/"):
+            if (skip_trash and rel.startswith(".Trash/")) or ".ld-" in rel:
+                continue
+            if rel == ARCHIVE + ".zip" and not os.path.isdir(os.path.join(home, ARCHIVE)):
+                snap.update(zip_members(p, ARCHIVE))
                 continue
             st = os.lstat(p)
             snap[rel] = (sha(p), st.st_mtime_ns // 1000, int(getattr(st, "st_birthtime", 0) * 1e6))
@@ -68,13 +83,13 @@ def compressed_files(home):
 
 
 def leftovers(home):
-    return [os.path.join(r, f) for r, _, fs in os.walk(home) for f in fs if ".ld-" in f]
+    return [os.path.join(r, f) for r, ds, fs in os.walk(home) for f in fs + ds if ".ld-" in os.path.join(r, f)]
 
 
 def diff(a, b, what="hash"):
     """Names of files missing or different between snapshots (what: hash = bytes only, all = bytes + times)."""
     idx = 1 if what == "hash" else 3
-    bad = [k for k in a if k not in b or a[k][:idx] != b[k][:idx]]
+    bad = [k for k in a if k not in b or a[k][:1 if b[k][1] is None else idx] != b[k][:1 if b[k][1] is None else idx]]
     return bad + [k for k in b if k not in a]
 
 
@@ -93,7 +108,10 @@ def t_tier1_roundtrip(c, res):
     mid = snapshot(home)
     assert not diff(before, mid, "all"), f"tier1 changed bytes or times: {diff(before, mid, 'all')[:5]}"
     assert compressed_files(home), "nothing was compressed"
+    assert os.path.isfile(os.path.join(home, ARCHIVE + ".zip")) and not os.path.exists(os.path.join(home, ARCHIVE)), \
+        "opted-in folder was not archived"
     c.doctor("undo", "--root", home, "--journal", j)
+    assert not os.path.exists(os.path.join(home, ARCHIVE + ".zip")), "archive left after undo"
     after = snapshot(home)
     assert not diff(before, after, "all"), f"undo did not restore: {diff(before, after, 'all')[:5]}"
     assert not compressed_files(home), f"still compressed after undo: {compressed_files(home)[:3]}"
@@ -119,6 +137,59 @@ def t_kill_during_tier1(c, res, trials=12):
     assert not leftovers(home), f"temp files left after recover: {leftovers(home)}"
     c.doctor("undo", "--root", home, "--journal", j)
     assert not diff(before, snapshot(home), "all"), "kill + undo did not restore the tree"
+
+
+def t_crash_points_archive(c, res):
+    """Power cut at every step of archiving and un-archiving: no file goes missing, recover + undo restore the tree."""
+    home, exp, j, out = c.fixture()
+    before = snapshot(home)
+    folder, zipf = os.path.join(home, ARCHIVE), os.path.join(home, ARCHIVE + ".zip")
+    def run(verb, point, *extra):
+        r = subprocess.run([c.bin, "--doctor", verb, "--catalogue", CATALOGUE, "--root", home, "--journal", j, *extra],
+                           env=dict(os.environ, LD_CRASH_AT=point), capture_output=True)
+        assert r.returncode != 0, f"{point}: crash point was not reached"
+    def intact(point):
+        now = snapshot(home)
+        missing = [k for k in before if k not in now]
+        assert not missing, f"{point}: files missing: {missing[:5]}"
+        changed = [k for k in before if now[k][0] != before[k][0]]   # an extra zip beside the intact folder is fine
+        assert not changed, f"{point}: bytes changed: {changed[:5]}"
+    for point in ["archive-zipped", "archive-verified", "archive-zip-in-place", "archive-aside", "archive-removed"]:
+        run("tier1", point, "--archive", ARCHIVE)
+        intact(point)
+        c.doctor("recover", "--root", home, "--journal", j)
+        assert not leftovers(home), f"{point}: temp files left after recover: {leftovers(home)}"
+        assert os.path.isdir(folder) != os.path.isfile(zipf), f"{point}: after recover want folder xor zip"
+        intact(point + "+recover")
+        c.doctor("undo", "--root", home, "--journal", j)
+        assert not diff(before, snapshot(home), "all"), f"{point}: recover + undo did not restore the tree"
+    for point in ["unarchive-extracted", "unarchive-in-place"]:
+        c.doctor("tier1", "--root", home, "--journal", j, "--archive", ARCHIVE)
+        assert os.path.isfile(zipf)
+        run("undo", point)
+        intact(point)
+        c.doctor("recover", "--root", home, "--journal", j)
+        assert not leftovers(home), f"{point}: temp files left after recover: {leftovers(home)}"
+        intact(point + "+recover")
+        c.doctor("undo", "--root", home, "--journal", j)
+        assert not diff(before, snapshot(home), "all"), f"{point}: recover + undo did not restore the tree"
+        assert not os.path.exists(zipf), f"{point}: zip left behind"
+
+
+def t_archive_refuses_changed_or_odd_folders(c, res):
+    """A symlink inside the folder, or an existing <folder>.zip, means no archiving at all."""
+    home, exp, j, out = c.fixture()
+    folder = os.path.join(home, ARCHIVE)
+    before = snapshot(home)
+    os.symlink("/etc/hosts", os.path.join(folder, "figures", "link"))
+    c.doctor("tier1", "--root", home, "--journal", j, "--archive", ARCHIVE)
+    assert os.path.isdir(folder) and not os.path.exists(folder + ".zip"), "archived a folder holding a symlink"
+    os.unlink(os.path.join(folder, "figures", "link"))
+    open(folder + ".zip", "wb").write(b"user's own zip")
+    c.doctor("tier1", "--root", home, "--journal", j, "--archive", ARCHIVE)
+    assert os.path.isdir(folder) and open(folder + ".zip", "rb").read() == b"user's own zip", "overwrote an existing zip"
+    now = snapshot(home)
+    assert all(now[k][0] == v[0] for k, v in before.items() if k.startswith(ARCHIVE + "/")), "archive folder bytes changed"
 
 
 def plan_for(c, home, out):
@@ -255,7 +326,8 @@ def planted(c, res):
     res["planted"] = {"found": len(exp["planted"]) - len(missing), "total": len(exp["planted"]), "missing": missing}
 
 
-SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_changed_between_plan_and_execute, t_no_approval_no_action,
+SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_archive_refuses_changed_or_odd_folders,
+          t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
           t_writes_need_root]
 

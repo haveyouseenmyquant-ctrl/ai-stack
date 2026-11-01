@@ -25,7 +25,8 @@ final class DoctorExecutor {
         for f in findings where f.action.tier == .automatic {
             switch f.action {
             case .compress: tally(&o, compress(f))
-            case .archiveFolder, .evictCloud, .quarantine:
+            case .archiveFolder: tally(&o, archiveFolder(f))
+            case .evictCloud, .quarantine:
                 // Not implemented yet: journalled as skipped so nothing happens silently.
                 log(f, phase: "skipped", reason: "not implemented yet"); o.skipped += 1
             case .report, .moveToTrash, .emptyTrash, .disableStartupItem, .disableBrowserExtension,
@@ -94,6 +95,125 @@ final class DoctorExecutor {
         return ("done", freed)
     }
 
+    // MARK: Archive an opted-in folder
+
+    /// zip into a temp sibling → extract it again and compare every file's SHA-256 and the entry list →
+    /// rename to `<folder>.zip` → rename the folder aside → remove it. Until the zip is verified and in place the
+    /// folder is untouched; after that every byte is in the zip, and the manifest in the journal restores times and modes.
+    func archiveFolder(_ f: Finding) -> (String, Int64) {
+        let path = (f.path as NSString).standardizingPath
+        if let why = guardian.refusal(path) { log(f, phase: "refused", reason: why); return ("refused", 0) }
+        guard DoctorFS.isDir(path) else { log(f, phase: "skipped", reason: "not a folder"); return ("skipped", 0) }
+        let zip = path + ".zip"
+        if DoctorFS.lstat(zip) != nil { log(f, phase: "skipped", reason: "\((zip as NSString).lastPathComponent) already exists"); return ("skipped", 0) }
+        guard let manifest = Self.manifest(path) else { log(f, phase: "skipped", reason: "contains links, special or unreadable files"); return ("skipped", 0) }
+        if let open = manifest.first(where: { !$0.dir && Self.isOpen(path + "/" + $0.rel) }) {
+            log(f, phase: "skipped", reason: "\(open.rel) is open in another process"); return ("skipped", 0)
+        }
+        let id = DoctorJournal.newId()
+        let tag = (path as NSString).deletingLastPathComponent + "/." + (path as NSString).lastPathComponent + ".ld-" + id.prefix(8)
+        let temp = tag + ".zip", check = tag + "-v", aside = tag + "-d"
+        var rec = JournalRecord(id: id, checkup: checkup, phase: "intent", action: .archiveFolder, tier: 1, planItem: f.id,
+                                from: path, to: zip, temp: temp, before: manifest.first?.state, reason: f.reason, manifest: manifest)
+        do { try journal.append(rec) } catch { return ("failed", 0) }
+        let fail: (String) -> (String, Int64) = { why in
+            unlink(temp); try? FileManager.default.removeItem(atPath: check)
+            rec.phase = "failed"; rec.reason = why; rec.ts = DoctorFS.iso(); rec.manifest = nil
+            try? self.journal.append(rec)
+            return ("failed", 0)
+        }
+        let z = DoctorScanner.run("/usr/bin/ditto", ["-c", "-k", "--sequesterRsrc", path, temp])
+        guard z.status == 0 else { return fail("ditto -c: \(z.text)") }
+        crashPoint("archive-zipped")
+        let x = DoctorScanner.run("/usr/bin/ditto", ["-x", "-k", temp, check])
+        guard x.status == 0 else { return fail("ditto -x: \(x.text)") }
+        guard let back = Self.manifest(check), Self.sameContents(manifest, back) else { return fail("verify: extracted zip differs") }
+        try? FileManager.default.removeItem(atPath: check)
+        guard let zstate = Self.state(temp) else { return fail("zip vanished") }
+        // The folder must not have changed while we zipped it.
+        guard let again = Self.manifest(path, hash: false), Self.sameShape(manifest, again) else { return fail("changed during archiving") }
+        var progress = rec
+        progress.phase = "verified"; progress.after = zstate; progress.manifest = nil; progress.ts = DoctorFS.iso()
+        do { try journal.append(progress) } catch { return fail("journal") }
+        crashPoint("archive-verified")
+        guard DoctorFS.lstat(zip) == nil, rename(temp, zip) == 0 else { return fail("rename zip errno \(errno)") }
+        crashPoint("archive-zip-in-place")
+        guard rename(path, aside) == 0 else {
+            unlink(zip); return fail("rename folder errno \(errno)")
+        }
+        crashPoint("archive-aside")
+        try? FileManager.default.removeItem(atPath: aside)
+        crashPoint("archive-removed")
+        let freed = max(0, manifest.reduce(Int64(0)) { $0 + $1.state.blocks } - zstate.blocks) * 512
+        rec.phase = "done"; rec.after = zstate; rec.temp = nil; rec.manifest = manifest; rec.freedBytes = freed; rec.ts = DoctorFS.iso()
+        try? journal.append(rec)
+        return ("done", freed)
+    }
+
+    /// Extract next to the zip, verify against the manifest, restore modes and times, rename into place, remove the zip.
+    private func unarchive(_ r: JournalRecord) -> Bool {
+        guard let path = r.from, let zip = r.to, let manifest = r.manifest else { return false }
+        guard DoctorFS.lstat(path) == nil, DoctorFS.lstat(zip) != nil else { appendUndo(r, "undo-failed", "folder exists or zip missing"); return false }
+        if let why = guardian.refusal(zip, forWrite: false) { appendUndo(r, "undo-failed", why); return false }
+        let out = (path as NSString).deletingLastPathComponent + "/." + (path as NSString).lastPathComponent + ".ld-" + r.id.prefix(8) + "-u"
+        try? FileManager.default.removeItem(atPath: out)
+        appendUndo(r, "undo-intent", nil, temp: out)
+        let fail: (String) -> Bool = { why in
+            try? FileManager.default.removeItem(atPath: out); self.appendUndo(r, "undo-failed", why); return false
+        }
+        let x = DoctorScanner.run("/usr/bin/ditto", ["-x", "-k", zip, out])
+        guard x.status == 0 else { return fail("ditto -x: \(x.text)") }
+        crashPoint("unarchive-extracted")
+        guard let back = Self.manifest(out), Self.sameContents(manifest, back) else { return fail("verify: zip no longer matches") }
+        // Deepest first so restoring a folder's times isn't undone by touching its children.
+        for e in manifest.sorted(by: { $0.rel.count > $1.rel.count }) {
+            let p = e.rel.isEmpty ? out : out + "/" + e.rel
+            guard chmod(p, mode_t(e.state.mode)) == 0, Self.setTimes(p, mtime: e.state.mtime, birth: e.state.birth) else { return fail("restore metadata") }
+        }
+        guard rename(out, path) == 0 else { return fail("rename errno \(errno)") }
+        crashPoint("unarchive-in-place")
+        unlink(zip)
+        appendUndo(r, "undo-done", nil)
+        return true
+    }
+
+    /// Every entry under `root` (root itself as ""), or nil if it holds anything but plain files and folders.
+    static func manifest(_ root: String, hash: Bool = true) -> [ManifestEntry]? {
+        var out: [ManifestEntry] = []
+        func walk(_ p: String, _ rel: String) -> Bool {
+            guard let st = DoctorFS.lstat(p) else { return false }
+            let kind = st.st_mode & S_IFMT
+            if kind == S_IFREG {
+                guard st.st_nlink == 1, let s = state(p, hash: hash), !hash || s.sha256 != nil else { return false }
+                out.append(ManifestEntry(rel: rel, dir: false, state: s)); return true
+            }
+            guard kind == S_IFDIR, let s = state(p, hash: false),
+                  let names = try? FileManager.default.contentsOfDirectory(atPath: p) else { return false }
+            out.append(ManifestEntry(rel: rel, dir: true, state: s))
+            for n in names.sorted() where !walk(p + "/" + n, rel.isEmpty ? n : rel + "/" + n) { return false }
+            return true
+        }
+        return walk(root, "") ? out : nil
+    }
+
+    /// Same entry list, kinds and file bytes (times are restored from the manifest, so they are not compared).
+    static func sameContents(_ a: [ManifestEntry], _ b: [ManifestEntry]) -> Bool {
+        let bm = Dictionary(b.map { ($0.rel, $0) }, uniquingKeysWith: { x, _ in x })
+        return a.count == b.count && a.allSatisfy { e in
+            guard let o = bm[e.rel], o.dir == e.dir else { return false }
+            return e.dir || (o.state.sha256 == e.state.sha256 && o.state.size == e.state.size)
+        }
+    }
+
+    /// Same entry list, sizes and file mtimes: a cheap "did anything change" check.
+    static func sameShape(_ a: [ManifestEntry], _ b: [ManifestEntry]) -> Bool {
+        let bm = Dictionary(b.map { ($0.rel, $0) }, uniquingKeysWith: { x, _ in x })
+        return a.count == b.count && a.allSatisfy { e in
+            guard let o = bm[e.rel], o.dir == e.dir else { return false }
+            return e.dir || (o.state.size == e.state.size && o.state.mtime == e.state.mtime)
+        }
+    }
+
     // MARK: Undo
 
     /// Undoes every `done` record in the journal (optionally one entry), newest first.
@@ -104,7 +224,8 @@ final class DoctorExecutor {
             switch r.action {
             case .compress: decompress(r) ? (o.done += 1) : (o.failed += 1)
             case .moveToTrash: restoreFromTrash(r) ? (o.done += 1) : (o.failed += 1)
-            case .report, .evictCloud, .archiveFolder, .quarantine, .emptyTrash, .disableStartupItem,
+            case .archiveFolder: unarchive(r) ? (o.done += 1) : (o.failed += 1)
+            case .report, .evictCloud, .quarantine, .emptyTrash, .disableStartupItem,
                  .disableBrowserExtension, .quitProcess, .uninstallApp, .moveFile: o.skipped += 1
             }
         }
@@ -158,6 +279,7 @@ final class DoctorExecutor {
         for r in records where r.phase == "intent" || r.phase == "undo-intent" {
             let key = "\(r.id)|\(r.phase == "undo-intent" ? "u" : "")"
             guard !ended.contains(key), let temp = r.temp else { continue }
+            if r.action == .archiveFolder { recoverArchive(r, records); n += 1; continue }
             if let orig = r.from, FileManager.default.fileExists(atPath: orig) {
                 unlink(temp)
             } else if let orig = r.from, FileManager.default.fileExists(atPath: temp) {
@@ -169,6 +291,41 @@ final class DoctorExecutor {
             n += 1
         }
         return n
+    }
+
+    /// An interrupted archive or un-archive. Every state on the way keeps the folder or a verified zip (or both).
+    private func recoverArchive(_ r: JournalRecord, _ records: [JournalRecord]) {
+        guard let path = r.from, let zip = r.to, let temp = r.temp else { return }
+        let fm = FileManager.default
+        let tag = (path as NSString).deletingLastPathComponent + "/." + (path as NSString).lastPathComponent + ".ld-" + r.id.prefix(8)
+        var e = r
+        e.ts = DoctorFS.iso(); e.temp = nil
+        if r.phase == "undo-intent" {
+            if DoctorFS.lstat(path) != nil {
+                // The folder is only renamed into place after it verified, so the restore is complete.
+                unlink(zip); e.phase = "undo-done"; e.reason = "interrupted after restore; finished"
+            } else {
+                try? fm.removeItem(atPath: temp); e.phase = "undo-failed"; e.reason = "interrupted; recovered"
+            }
+            try? journal.append(e); return
+        }
+        unlink(temp); try? fm.removeItem(atPath: tag + "-v")
+        let verified = records.last { $0.id == r.id && $0.phase == "verified" }?.after
+        if DoctorFS.lstat(path) != nil {
+            // Folder intact: drop our zip if it got into place, and leave things as they were.
+            if let v = verified, DoctorFS.lstat(zip) != nil, DoctorFS.sha256(file: zip) == v.sha256 { unlink(zip) }
+            e.phase = "failed"; e.reason = "interrupted; recovered"; e.manifest = nil
+        } else if let v = verified, DoctorFS.lstat(zip) != nil {
+            // The verified zip is in place and the folder was moved aside: finish removing it.
+            try? fm.removeItem(atPath: tag + "-d")
+            e.phase = "done"; e.after = v; e.reason = "interrupted while removing the folder; finished"
+            e.freedBytes = max(0, (r.manifest ?? []).reduce(Int64(0)) { $0 + $1.state.blocks } - v.blocks) * 512
+        } else {
+            // Never expected: put the aside copy back rather than lose anything.
+            if DoctorFS.lstat(tag + "-d") != nil { rename(tag + "-d", path) }
+            e.phase = "failed"; e.reason = "interrupted; folder restored"; e.manifest = nil
+        }
+        try? journal.append(e)
     }
 
     // MARK: Tier 2
@@ -231,6 +388,12 @@ final class DoctorExecutor {
     }
 
     // MARK: Helpers
+
+    /// Test hook: with --root only, LD_CRASH_AT=<point> kills the process there, like a power cut.
+    private func crashPoint(_ name: String) {
+        guard testRoot, ProcessInfo.processInfo.environment["LD_CRASH_AT"] == name else { return }
+        kill(getpid(), SIGKILL)
+    }
 
     static func tempSibling(_ path: String, _ id: String) -> String {
         (path as NSString).deletingLastPathComponent + "/." + (path as NSString).lastPathComponent + ".ld-" + id.prefix(8)

@@ -19,6 +19,13 @@ struct JournalRecord: Codable {
     var by: String? = nil
     var reason: String? = nil
     var freedBytes: Int64? = nil
+    var manifest: [ManifestEntry]? = nil   // archiveFolder: every entry of the folder, to verify and restore
+}
+
+struct ManifestEntry: Codable {
+    var rel: String     // "" is the folder itself
+    var dir: Bool
+    var state: FileState
 }
 
 struct FileState: Codable {
