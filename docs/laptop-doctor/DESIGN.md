@@ -195,3 +195,13 @@ One call per checkup through the existing `ClaudeCLI` / `ClaudeCli` (haiku). The
 - `tests/safety/` contains the five suites from the brief, run against the CLI. The kill test runs each Tier 1 action under a harness that `SIGKILL`s / `TerminateProcess`es it after a random delay (seeded, 50 trials per action), then checks every original path still exists with its original hash (or the result's hash after a completed step).
 - CI (`.github/workflows/doctor.yml` on the fork): a matrix of `macos-latest` and `windows-latest` that builds, makes the fixture, runs the suite, and uploads `doctor-results.json` (`safety: {passed,total}`, `planted: {found,total}`, `tier1: {freed,eligible}`, `unapprovedDestructive`) as an artifact.
 - `measure.sh` (project folder) reads the latest successful-or-failed run's artifacts from the fork via `gh` and reports the worst platform.
+
+## 12. Decisions made while implementing (session 2, 2026-11-01)
+
+- **"Cold" = mtime older than N days AND Spotlight's `kMDItemLastUsedDate` (if any) older than N days.** atime is not used: APFS updates it on reads, including our own hashing and sampling, so it would make every scanned file look "opened".
+- **Compression floor: 256 KiB** (`minCompressBytes`). Below that the block savings don't pay for a copy + verify + rename. Executable files (`mode & 0o111`), hard-linked files, already-compressed files, hidden folders, `~/Library`, bundles and git work trees are not walked.
+- **The 7-day rule for folders looks at the newest *file* inside, not the folder's own mtime.** A folder's mtime changes whenever an entry is added or removed (e.g. the Trash whenever anything is trashed). Empty folders fall back to their own mtime.
+- **Writing verbs (`tier1`, `approve`, `execute`, `undo`, `recover`) refuse to run without `--root`** until the UI ships. Without `--root` the CLI can only scan and plan, so real-machine runs are dry-run by construction.
+- **Execute order per item:** Guard → approval record for the same `planItem`, path and action → fingerprint (size, mtime, sha256) re-check → journal `intent` → act → journal `done`/`failed`. A file changed between plan and execution is either refused by the 7-day rule (fresh mtime) or skipped by the fingerprint check (same mtime, different bytes). The safety suite covers both.
+- **Rule-approved lossy actions are dropped at approval time** (`approve --by rule:<id>` writes no record for `emptyTrash`, `quitProcess`, `uninstallApp`), so `execute` refuses them.
+- **Not implemented yet** (journalled as `skipped`, never silently ignored): `archiveFolder`, `evictCloud`, `quarantine`, `emptyTrash`, `disableStartupItem`, `quitProcess`.
