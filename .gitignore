@@ -6,3 +6,6 @@ build/
 windows/helper/bin/
 windows/helper/obj/
 dist/
+
+# Laptop Doctor fixtures
+/out/
