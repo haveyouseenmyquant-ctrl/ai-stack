@@ -50,16 +50,18 @@ public static class DoctorCloud
         return new State(inSync == 1, pin == 1 /* CF_PIN_STATE_PINNED */ || (attrs & FILE_ATTRIBUTE_PINNED) != 0, dehydrated);
     }
 
-    /// Frees the local bytes. The handle comes from CfOpenFileWithOplock (exclusive, write access): it fails if the
-    /// file is open elsewhere, and the oplock lets the cloud filter purge the data. A plain share-0 CreateFile handle
-    /// made CfDehydratePlaceholder block forever on Windows CI. Bounded anyway: false = still running after
+    /// Frees the local bytes, through a share-all attributes-only handle: the cloud filter opens the file itself to
+    /// purge the data, so any share-none handle of ours (plain CreateFile, or CfOpenFileWithOplock's EXCLUSIVE) made
+    /// CfDehydratePlaceholder wait forever on Windows CI. Files open elsewhere were ruled out by the caller, and the
+    /// filter itself refuses to purge a file another process has open. Bounded anyway: false = still running after
     /// `timeoutSec`; the file is then either local or evicted (both lossless) and the journal's recover settles it.
     public static bool Dehydrate(string path, int timeoutSec = 60)
     {
-        Check(CfOpenFileWithOplock(path, 1 | 2 /* CF_OPEN_FILE_FLAG_EXCLUSIVE | WRITE_ACCESS */, out var h), "CfOpenFileWithOplock");
+        var h = Open(path, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, share: 7);
+        if (h.IsInvalid) throw new IOException($"open: {Marshal.GetLastWin32Error()}");
         var work = Task.Run(() => CfDehydratePlaceholder(h, 0, -1, 0, IntPtr.Zero));
         if (!work.Wait(timeoutSec * 1000)) return false;   // the handle leaks with the stuck call; the process exits soon
-        CfCloseHandle(h);
+        h.Dispose();
         Check(work.Result, "CfDehydratePlaceholder");
         return true;
     }
@@ -100,11 +102,7 @@ public static class DoctorCloud
     [DllImport("cldapi.dll")]
     static extern int CfGetPlaceholderInfo(SafeFileHandle h, int infoClass, byte[] info, int length, out int returned);
     [DllImport("cldapi.dll")]
-    static extern int CfDehydratePlaceholder(IntPtr h, long offset, long length, int flags, IntPtr overlapped);
-    [DllImport("cldapi.dll", CharSet = CharSet.Unicode)]
-    static extern int CfOpenFileWithOplock(string path, int flags, out IntPtr protectedHandle);
-    [DllImport("cldapi.dll")]
-    static extern void CfCloseHandle(IntPtr protectedHandle);
+    static extern int CfDehydratePlaceholder(SafeFileHandle h, long offset, long length, int flags, IntPtr overlapped);
     [DllImport("cldapi.dll")]
     static extern int CfHydratePlaceholder(SafeFileHandle h, long offset, long length, int flags, IntPtr overlapped);
 }
