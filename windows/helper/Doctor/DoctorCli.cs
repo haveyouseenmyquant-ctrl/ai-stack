@@ -11,6 +11,9 @@ namespace AIStack.Doctor;
 ///     AIStackHelper --doctor execute --root <home> --plan plan.json --journal <file>
 ///     AIStackHelper --doctor undo    --root <home> --journal <file> [--entry <id>]
 ///     AIStackHelper --doctor recover --root <home> --journal <file>
+///     AIStackHelper --doctor checkup --root <home> --journal <file> --dir <out> [--tier1 compress,evictCloud,archiveFolder,quarantine]
+///                                    [--threshold coldDays=90]… [--archive <folder>]…   (what the scheduler runs)
+///     AIStackHelper --doctor due     --now <iso> [--last <iso>] --weekday 1-7 --hour 0-23 [--notified <iso>]   (UTC)
 ///     AIStackHelper --doctor verify-journal <file>…
 ///     AIStackHelper --doctor summary-prompt --report report.json   (exactly what the Claude summary would send)
 ///     AIStackHelper --doctor summary --report report.json [--model haiku]
@@ -47,7 +50,7 @@ public static class DoctorCli
         var catalogue = DoctorCatalogue.Load(One("catalogue"));
         var checkup = One("checkup") ?? DoctorFS.Iso();
         var archive = (values.GetValueOrDefault("archive") ?? new()).Select(p => Path.IsPathRooted(p) ? p : Path.Combine(home, p)).ToList();
-        if (verb is "tier1" or "approve" or "execute" or "undo" or "recover" && root == null)
+        if (verb is "tier1" or "checkup" or "approve" or "execute" or "undo" or "recover" && root == null)
             throw new InvalidOperationException($"{verb} needs --root <fixture home>; real-profile writes are not enabled");
         if (root != null && !Directory.Exists(home)) throw new InvalidOperationException($"no such root {home}");
 
@@ -76,6 +79,30 @@ public static class DoctorCli
                 var j = Journal(); var ex = Executor(j);
                 ex.Recover(DoctorJournal.Read(j.Path));
                 Emit(ex.RunTier1(Scan().Item1), null);
+                break;
+            }
+            case "checkup":
+            {
+                var dir = One("dir") ?? throw new InvalidOperationException("--dir <folder> required");
+                var opts = new DoctorCheckupOptions { ArchiveFolders = archive };
+                if (One("tier1") is string t)
+                    opts.Tier1 = t.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(x => Enum.TryParse<DoctorAction>(x, true, out var act) ? act : (DoctorAction?)null)
+                        .Where(x => x != null).Select(x => x!.Value).ToHashSet();
+                if (flags.Contains("tier1")) opts.Tier1 = new();   // `--tier1` with nothing after it: every switch off
+                foreach (var kv in values.GetValueOrDefault("threshold") ?? new())
+                    if (kv.Split('=') is [var k, var v] && int.TryParse(v, out var n)) opts.Thresholds[k] = n;
+                Emit(DoctorCheckup.Run(home, catalogue, opts, Journal(), dir, true, checkup), null);
+                break;
+            }
+            case "due":
+            {
+                var now = DoctorSchedule.ParseUtc(One("now")) ?? throw new InvalidOperationException("--now required");
+                if (!int.TryParse(One("weekday"), out var wd) || !int.TryParse(One("hour"), out var h))
+                    throw new InvalidOperationException("--weekday and --hour required");
+                var due = DoctorSchedule.IsDue(now, DoctorSchedule.ParseUtc(One("last")), wd, h);
+                var notify = DoctorSchedule.MayNotify(now, DoctorSchedule.ParseUtc(One("notified")));
+                Console.WriteLine($"{{\"due\": {(due ? "true" : "false")}, \"mayNotify\": {(notify ? "true" : "false")}}}");
                 break;
             }
             case "approve":
@@ -139,7 +166,7 @@ public static class DoctorCli
         return plan;
     }
 
-    static void Emit<T>(T v, string? outPath)
+    public static void Emit<T>(T v, string? outPath)
     {
         var json = JsonSerializer.Serialize(v, DoctorFS.Json);
         if (outPath != null) File.WriteAllText(outPath, json); else Console.WriteLine(json);

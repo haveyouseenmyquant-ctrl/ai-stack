@@ -29,7 +29,9 @@ struct DoctorScanner {
             case "coldCompressible": found = coldCompressible()
             case "optedInFolders": found = optedInFolders.compactMap { f in
                     guard DoctorFS.isDir(f) else { return nil }
-                    return (f, DoctorFS.treeStats(f).size, "you marked this folder for archiving", nil) }
+                    let t = DoctorFS.treeStats(f), a = (now.timeIntervalSince1970 - t.newest) / 86400
+                    guard a >= days(c.match.olderThanDays) else { return nil }
+                    return (f, t.size, String(format: "you marked this folder for archiving; untouched %.0f days", a), nil) }
             case "children": found = roots.flatMap { children($0, olderThan: days(c.match.olderThanDays)) }
             case "extensions": found = roots.flatMap { withExtensions($0, c.match.extensions ?? [], olderThan: days(c.match.olderThanDays)) }
             case "duplicates": found = duplicates(roots)

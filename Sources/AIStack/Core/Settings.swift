@@ -56,7 +56,13 @@ final class AppSettings: ObservableObject {
     @Published var claudePath: String { didSet { defaults.set(claudePath, forKey: "claude.path") } }
 
     // Laptop Doctor: off until the user has read what it will and won't do (spec: BRIEF §3).
-    @Published var doctorEnabled: Bool { didSet { defaults.set(doctorEnabled, forKey: "doctor.enabled") } }
+    @Published var doctorEnabled: Bool {
+        didSet {
+            defaults.set(doctorEnabled, forKey: "doctor.enabled")
+            // The first checkup waits for the next scheduled slot, not one that passed while it was off.
+            if doctorEnabled && !oldValue { defaults.set(Date(), forKey: "doctor.lastRun") }
+        }
+    }
     /// 1 = Sunday … 7 = Saturday (Calendar weekday), hour 0–23. Runs only on mains power and when idle.
     @Published var doctorWeekday: Int { didSet { defaults.set(doctorWeekday, forKey: "doctor.weekday") } }
     @Published var doctorHour: Int { didSet { defaults.set(doctorHour, forKey: "doctor.hour") } }

@@ -11,6 +11,9 @@ import Foundation
 ///     AIStack --doctor recover --root <home> --journal <file>
 ///     AIStack --doctor summary-prompt --report report.json   (exactly what the Claude summary would send)
 ///     AIStack --doctor summary --report report.json [--model haiku]
+///     AIStack --doctor checkup --root <home> --journal <file> --dir <out> [--tier1 compress,evictCloud,archiveFolder,quarantine]
+///                              [--threshold coldDays=90]… [--archive <folder>]…   (what the scheduler runs)
+///     AIStack --doctor due     --now <iso> [--last <iso>] --weekday 1-7 --hour 0-23 [--notified <iso>]   (UTC calendar)
 ///     AIStack --doctor verify-journal <file>…
 ///
 /// Without --root the real home folder is used, and only `scan`, `plan` and `verify-journal` are allowed
@@ -54,7 +57,7 @@ enum DoctorCLI {
         let catalogue = try DoctorCatalogue.load(o.one("catalogue"))
         let checkup = o.one("checkup") ?? DoctorFS.iso()
         let archive = (o.values["archive"] ?? []).map { $0.hasPrefix("/") ? $0 : home + "/" + $0 }
-        let writing = ["tier1", "approve", "execute", "undo", "recover"].contains(verb)
+        let writing = ["tier1", "checkup", "approve", "execute", "undo", "recover"].contains(verb)
         if writing && root == nil { throw UsageError(description: "\(verb) needs --root <fixture home>; real-home writes are not enabled") }
         if root != nil && !FileManager.default.fileExists(atPath: home) { throw UsageError(description: "no such root \(home)") }
 
@@ -88,6 +91,27 @@ enum DoctorCLI {
             let ex = executor(j)
             _ = ex.recover(records: DoctorJournal.read(j.path))
             try emit(ex.runTier1(scan().0), nil)
+        case "checkup":
+            guard let dir = o.one("dir") else { throw UsageError(description: "--dir <folder> required") }
+            var opts = DoctorCheckupOptions(archiveFolders: archive)
+            if let t = o.one("tier1") { opts.tier1 = Set(t.split(separator: ",").compactMap { DoctorAction(rawValue: String($0)) }) }
+            if o.flags.contains("tier1") { opts.tier1 = [] }   // `--tier1` with nothing after it: every switch off
+            for kv in o.values["threshold"] ?? [] {
+                let p = kv.split(separator: "=")
+                if p.count == 2, let v = Int(p[1]) { opts.thresholds[String(p[0])] = v }
+            }
+            try emit(DoctorCheckup.run(home: home, catalogue: catalogue, options: opts, journal: try journal(), dir: dir,
+                                       testRoot: true, checkup: checkup), nil)
+        case "due":
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = TimeZone(identifier: "UTC")!
+            let f = ISO8601DateFormatter()
+            func date(_ k: String) -> Date? { o.one(k).flatMap { f.date(from: $0) } }
+            guard let now = date("now"), let wd = o.one("weekday").flatMap(Int.init), let h = o.one("hour").flatMap(Int.init)
+            else { throw UsageError(description: "--now, --weekday and --hour required") }
+            let due = DoctorSchedule.isDue(now: now, lastRun: date("last"), weekday: wd, hour: h, calendar: cal)
+            let notify = DoctorSchedule.mayNotify(now: now, lastNotified: date("notified"), calendar: cal)
+            print("{\"due\": \(due), \"mayNotify\": \(notify)}")
         case "approve":
             let plan = try loadPlan()
             let ids = Set((o.one("items") ?? "").split(separator: ",").map(String.init))

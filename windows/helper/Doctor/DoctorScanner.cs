@@ -43,7 +43,10 @@ public class DoctorScanner
                 case "coldCompressible": found = ColdCompressible(); break;
                 case "cloudFiles": found = CloudFiles(); break;
                 case "optedInFolders":
-                    found = optedIn.Where(DoctorFS.IsDir).Select(f => new Hit(f, DoctorFS.TreeStats(f).Size, "you marked this folder for archiving")).ToList();
+                    found = optedIn.Where(DoctorFS.IsDir)
+                        .Select(f => (f, t: DoctorFS.TreeStats(f)))
+                        .Where(x => (now - x.t.Newest) / 86400 >= Days(c.Match.OlderThanDays))
+                        .Select(x => new Hit(x.f, x.t.Size, $"you marked this folder for archiving; untouched {(now - x.t.Newest) / 86400:F0} days")).ToList();
                     break;
                 case "children": found = roots.SelectMany(r => Children(r, Days(c.Match.OlderThanDays))).ToList(); break;
                 case "extensions": found = roots.SelectMany(r => WithExtensions(r, c.Match.Extensions ?? new(), Days(c.Match.OlderThanDays))).ToList(); break;

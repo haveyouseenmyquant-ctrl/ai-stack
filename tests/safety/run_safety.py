@@ -513,9 +513,54 @@ def t_summary_sends_no_user_names(c, res):
         "summary prompt contains the home path"
 
 
+def t_checkup_respects_switches(c, res):
+    """The scheduled checkup runs only the Tier 1 kinds the user switched on, with the user's N-day thresholds."""
+    home, exp, j, out = c.fixture()
+    before, b0 = snapshot(home), blocks(home)
+    r = json.loads(c.doctor("checkup", "--root", home, "--journal", j, "--dir", os.path.join(out, "c1"), "--tier1",
+                            "--archive", ARCHIVE).stdout)
+    assert r["tier1"]["done"] == 0 and r["tier1Disabled"] > 0, f"switches off but tier1 ran: {r}"
+    assert not diff(before, snapshot(home), "all") and blocks(home) == b0, "checkup with every switch off changed files"
+    for f in ("report.json", "plan.json", "outcome.json"):
+        assert os.path.isfile(os.path.join(r["folder"], f)), f"checkup wrote no {f}"
+    assert r["planItems"] == sum(len(g["items"]) for g in load(os.path.join(r["folder"], "plan.json"))["groups"]) > 0
+    # Compression only: the opted-in folder stays a folder.
+    r = json.loads(c.doctor("checkup", "--root", home, "--journal", j, "--dir", os.path.join(out, "c2"), "--tier1", "compress",
+                            "--archive", ARCHIVE).stdout)
+    acts = {x["action"] for x in map(json.loads, open(j)) if x["phase"] in ("intent", "done")}
+    assert r["tier1"]["done"] > 0 and acts == {"compress"}, f"compress-only checkup did {acts}"
+    assert os.path.isdir(os.path.join(home, ARCHIVE)), "archiving ran while switched off"
+    # Archiving on, but the folder (900 days old) is younger than the user's threshold: left alone; then archived.
+    c.doctor("checkup", "--root", home, "--journal", j, "--dir", os.path.join(out, "c3"), "--tier1", "archiveFolder",
+             "--archive", ARCHIVE, "--threshold", "archiveDays=2000")
+    assert os.path.isdir(os.path.join(home, ARCHIVE)), "archived a folder younger than archiveDays"
+    c.doctor("checkup", "--root", home, "--journal", j, "--dir", os.path.join(out, "c4"), "--tier1", "archiveFolder",
+             "--archive", ARCHIVE, "--threshold", "archiveDays=365")
+    assert os.path.isfile(os.path.join(home, ARCHIVE + ".zip")), "opted-in folder older than archiveDays was not archived"
+    c.doctor("undo", "--root", home, "--journal", j)
+    assert not diff(before, snapshot(home), "all"), "undo after checkups did not restore the tree"
+
+
+def t_schedule_once_per_slot(c, res):
+    """Weekly slot Sunday 11:00 UTC (2026-11-01 is a Sunday); at most one approval request a day."""
+    def due(now, last=None, notified=None):
+        a = ["--now", now, "--weekday", "1", "--hour", "11"] + (["--last", last] if last else []) + \
+            (["--notified", notified] if notified else [])
+        return json.loads(c.doctor("due", *a).stdout)
+    assert due("2026-11-01T11:30:00Z", "2026-10-25T11:05:00Z")["due"], "slot passed, last run a week ago: not due"
+    assert not due("2026-11-01T10:59:00Z", "2026-10-25T11:05:00Z")["due"], "due before the slot"
+    assert not due("2026-11-01T11:30:00Z", "2026-11-01T11:10:00Z")["due"], "due twice in one slot"
+    assert due("2026-11-04T03:00:00Z", "2026-10-25T11:05:00Z")["due"], "missed slot (asleep) does not catch up"
+    assert not due("2026-11-01T11:00:00Z")["due"], "just switched on: runs before its first slot"
+    assert not due("2026-11-04T03:00:00Z", notified="2026-11-04T01:00:00Z")["mayNotify"], "two approval requests in a day"
+    assert due("2026-11-04T03:00:00Z", notified="2026-11-03T23:00:00Z")["mayNotify"], "no request the next day"
+
+
 def t_writes_need_root(c, res):
     r = c.doctor("tier1", "--journal", os.path.join(c.work, "x.jsonl"), check=False)
     assert r.returncode != 0, "tier1 ran without --root"
+    r = c.doctor("checkup", "--journal", os.path.join(c.work, "x.jsonl"), "--dir", c.work, check=False)
+    assert r.returncode != 0, "checkup ran without --root"
     r = c.doctor("execute", "--plan", "/nonexistent", "--journal", os.path.join(c.work, "x.jsonl"), check=False)
     assert r.returncode != 0, "execute ran without --root"
 
@@ -552,7 +597,7 @@ SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_arch
           t_crash_points_compress if WINDOWS else t_quarantine_roundtrip_and_crash_points,
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
-          t_writes_need_root, t_summary_sends_no_user_names] + ([t_evict_cloud_roundtrip] if WINDOWS else [])
+          t_writes_need_root, t_summary_sends_no_user_names, t_checkup_respects_switches, t_schedule_once_per_slot] + ([t_evict_cloud_roundtrip] if WINDOWS else [])
 
 
 def main():

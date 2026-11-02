@@ -30,6 +30,7 @@ mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources" "$BUNDLE/Contents
 cp "$BIN" "$BUNDLE/Contents/MacOS/AIStack"
 cp Support/Info.plist "$BUNDLE/Contents/Info.plist"
 cp Support/AppIcon.icns "$BUNDLE/Contents/Resources/AppIcon.icns"
+cp shared/doctor-catalogue.json "$BUNDLE/Contents/Resources/doctor-catalogue.json"   # Laptop Doctor rules, shared with Windows
 cp Support/com.gaspardoliviers.aistack.agent.plist "$BUNDLE/Contents/Library/LaunchAgents/"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(date +%Y%m%d%H%M)" "$BUNDLE/Contents/Info.plist"
 

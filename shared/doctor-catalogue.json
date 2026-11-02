@@ -8,7 +8,7 @@
     "neverModifiedWithinDays": 7,
     "undecidedExpiryDays": 30,
     "installerAgeDays": 30,
-    "inactiveProjectDays": 90,
+    "inactiveProjectDays": 90, "archiveDays": 90,
     "duplicateMinBytes": 102400,
     "busyCpuPercent": 20
   },
@@ -23,7 +23,7 @@
       "paths": { "macos": ["~"], "windows": ["%USERPROFILE%"] } },
     { "id": "opted-in-archive", "action": "archiveFolder", "tier": 1,
       "label": "Zip {count} folders you marked for archiving",
-      "match": { "kind": "optedInFolders" },
+      "match": { "kind": "optedInFolders", "olderThanDays": "archiveDays" },
       "paths": { "macos": [], "windows": [] } },
     { "id": "malware", "action": "quarantine", "tier": 1,
       "label": "Quarantine {count} files ClamAV flags as malware (undo restores them)",

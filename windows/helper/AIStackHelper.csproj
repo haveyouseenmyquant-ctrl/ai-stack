@@ -15,6 +15,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Laptop Doctor rules, shared with macOS; DoctorCatalogue.Load looks next to the exe. -->
+    <None Include="../../shared/doctor-catalogue.json" Link="doctor-catalogue.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="NAudio.Wasapi" Version="3.2.0" />
     <PackageReference Include="Whisper.net" Version="1.9.1" />
     <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" />

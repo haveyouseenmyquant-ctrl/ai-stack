@@ -8,6 +8,7 @@ enum Notifier {
         static let detected = "MEETING_DETECTED"
         static let recording = "RECORDING"
         static let ready = "NOTES_READY"
+        static let doctorPlan = "DOCTOR_PLAN"
     }
 
     enum Action {
@@ -28,6 +29,9 @@ enum Notifier {
             ], intentIdentifiers: []),
             UNNotificationCategory(identifier: Category.ready, actions: [
                 UNNotificationAction(identifier: Action.open, title: "Open", options: [.foreground]),
+            ], intentIdentifiers: []),
+            UNNotificationCategory(identifier: Category.doctorPlan, actions: [
+                UNNotificationAction(identifier: Action.open, title: "Review", options: [.foreground]),
             ], intentIdentifiers: []),
         ])
     }
@@ -59,6 +63,16 @@ enum Notifier {
     static func notesFailed(_ meeting: Meeting, error: String) {
         post(id: "failed-\(meeting.id)", title: "Couldn't write meeting notes", body: error,
              category: Category.ready, userInfo: ["meeting": meeting.id.uuidString])
+    }
+
+    static func doctorPlanReady(_ r: DoctorCheckup.Result) {
+        let size = ByteCountFormatter.string(fromByteCount: r.planBytes, countStyle: .file)
+        var body = "\(r.planItems) suggestions (\(size)) wait for your OK. Nothing is removed until you approve."
+        if r.tier1.freedBytes > 0 {
+            body = "Freed \(ByteCountFormatter.string(fromByteCount: r.tier1.freedBytes, countStyle: .file)) without deleting anything. " + body
+        }
+        post(id: "doctor-plan", title: "Laptop Doctor checkup", body: body, category: Category.doctorPlan,
+             userInfo: ["folder": r.folder])
     }
 
     private static func post(id: String, title: String, body: String, category: String, userInfo: [String: String], sound: Bool = true) {

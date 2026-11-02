@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private(set) var recorder: MeetingRecorder!
     private(set) var detector: MeetingDetector!
     private(set) var writing: WritingAssistant!
+    private(set) var doctor: DoctorScheduler!
     private var statusItem: NSStatusItem!
     private var cancellables = Set<AnyCancellable>()
     private var acceptAllHotKey: HotKey?
@@ -47,6 +48,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
         writing.start()
         detector.start()
+        doctor = DoctorScheduler(settings: settings)
+        doctor.start()
         // ⌃⌥A: accept every suggestion in the focused field, from any app.
         acceptAllHotKey = HotKey(keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(controlKey | optionKey), id: 1) { [weak self] in
             self?.writing.acceptAll()
@@ -300,8 +303,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let category = response.notification.request.content.categoryIdentifier
         let action = response.actionIdentifier
         let meetingID = (response.notification.request.content.userInfo["meeting"] as? String).flatMap(UUID.init(uuidString:))
+        let doctorFolder = response.notification.request.content.userInfo["folder"] as? String
         await MainActor.run {
             switch (category, action) {
+            case (Notifier.Category.doctorPlan, _):
+                // Until the report window lands: show the checkup's report and plan files.
+                if let doctorFolder { NSWorkspace.shared.open(URL(fileURLWithPath: doctorFolder, isDirectory: true)) }
             case (Notifier.Category.detected, Notifier.Action.start),
                  (Notifier.Category.detected, UNNotificationDefaultActionIdentifier):
                 self.detector.startPending()
