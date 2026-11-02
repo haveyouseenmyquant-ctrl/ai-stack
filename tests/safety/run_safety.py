@@ -610,8 +610,8 @@ def t_report_window_decisions(c, res):
     def decide(decision, ids, check=True):
         return c.doctor("decide", "--root", home, "--journal", j, "--dir", d, "--plan", plan, "--decision", decision,
                         "--items", ",".join(ids), check=check)
-    def journal():
-        return [json.loads(l) for l in open(j)]
+    def journal():   # the Windows journal file only appears with its first record
+        return [json.loads(l) for l in open(j)] if os.path.exists(j) else []
     before = snapshot(home, skip_trash=True)
     n = len(journal())
     lossy = cat("trash") or cat("busy-process")
