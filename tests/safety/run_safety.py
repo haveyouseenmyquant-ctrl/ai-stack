@@ -502,7 +502,8 @@ def t_summary_sends_no_user_names(c, res):
         names |= {n for n in ds + fs if len(n) >= 4}
     leaked = sorted(n for n in names - allowed if n in prompt)
     assert not leaked, f"summary prompt contains user file/folder names: {leaked[:5]}"
-    assert os.path.basename(home) not in prompt and home not in prompt, "summary prompt contains the home path"
+    assert os.path.basename(home) not in prompt and home not in prompt and json.dumps(home)[1:-1] not in prompt, \
+        "summary prompt contains the home path"
 
 
 def t_writes_need_root(c, res):
@@ -544,7 +545,7 @@ SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_arch
           t_crash_points_compress if WINDOWS else t_quarantine_roundtrip_and_crash_points,
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
-          t_writes_need_root] + ([t_evict_cloud_roundtrip] if WINDOWS else [t_summary_sends_no_user_names])
+          t_writes_need_root, t_summary_sends_no_user_names] + ([t_evict_cloud_roundtrip] if WINDOWS else [])
 
 
 def main():

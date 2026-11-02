@@ -28,7 +28,7 @@ public class DoctorScanner
     /// In test mode the Recycle Bin is `<root>/RecycleBinFixture`.
     public static string TrashDir(string home) => Path.Combine(home, "RecycleBinFixture");
 
-    record Hit(string Path, long Bytes, string Reason, string? Flag = null);
+    record Hit(string Path, long Bytes, string Reason, string? Flag = null, string? Name = null, string? Executable = null);
 
     public List<Finding> Scan()
     {
@@ -73,7 +73,7 @@ public class DoctorScanner
                     foreach (var b in BusyProcesses())
                         out_.Add(new Finding { Id = Finding.ItemId(c.Id, $"pid:{b.Pid}:{b.Name}"), Category = c.Id, Action = c.Action,
                                                Tier = (int)catalogue.TierOf(c), Path = b.Path, Reason = $"{b.Cpu:F0}% CPU",
-                                               ProcessName = b.Name, Pid = b.Pid });
+                                               ProcessName = b.Name, Executable = b.Path, Pid = b.Pid });
                     break;
                 default: Skipped.Add($"unknown matcher {c.Match.Kind} in {c.Id}"); break;
             }
@@ -85,7 +85,8 @@ public class DoctorScanner
                     continue;
                 }
                 out_.Add(new Finding { Id = Finding.ItemId(c.Id, h.Path), Category = c.Id, Action = c.Action, Tier = (int)catalogue.TierOf(c),
-                                       Path = h.Path, Bytes = h.Bytes, Reason = h.Reason, Flag = h.Flag, Fingerprint = DoctorFS.FingerprintOf(h.Path) });
+                                       Path = h.Path, Bytes = h.Bytes, Reason = h.Reason, Flag = h.Flag,
+                                       ProcessName = h.Name, Executable = h.Executable, Fingerprint = DoctorFS.FingerprintOf(h.Path) });
             }
         }
         return out_;
@@ -260,8 +261,8 @@ public class DoctorScanner
                 var program = ProgramOf(Environment.ExpandEnvironmentVariables(k.GetValue(name)?.ToString() ?? ""));
                 // In test mode only items pointing into the fixture count; the runner's own items are not ours to judge.
                 if (testRoot && !program.StartsWith(home + Path.DirectorySeparatorChar, DoctorFS.PathCmp)) continue;
-                if (program == "" || !File.Exists(program)) { out_.Add(new Hit(program, 0, $"{name} starts a missing program", "orphaned")); continue; }
-                if (!IsSigned(program)) out_.Add(new Hit(program, 0, $"{name} (HKCU\\{key}) starts an unsigned program", "unsigned"));
+                if (program == "" || !File.Exists(program)) { out_.Add(new Hit(program, 0, $"{name} starts a missing program", "orphaned", name, program)); continue; }
+                if (!IsSigned(program)) out_.Add(new Hit(program, 0, $"{name} (HKCU\\{key}) starts an unsigned program", "unsigned", name, program));
             }
         }
         return out_;

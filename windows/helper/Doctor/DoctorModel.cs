@@ -50,6 +50,7 @@ public class Finding
     public string Reason { get; set; } = "";
     public string? Flag { get; set; }
     public string? ProcessName { get; set; }
+    public string? Executable { get; set; }
     public int? Pid { get; set; }
     public Fingerprint? Fingerprint { get; set; }
 

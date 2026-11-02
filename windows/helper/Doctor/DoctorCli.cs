@@ -12,8 +12,10 @@ namespace AIStack.Doctor;
 ///     AIStackHelper --doctor undo    --root <home> --journal <file> [--entry <id>]
 ///     AIStackHelper --doctor recover --root <home> --journal <file>
 ///     AIStackHelper --doctor verify-journal <file>…
+///     AIStackHelper --doctor summary-prompt --report report.json   (exactly what the Claude summary would send)
+///     AIStackHelper --doctor summary --report report.json [--model haiku]
 ///
-/// Without --root the real profile is used, and only `scan`, `plan` and `verify-journal` are allowed.
+/// Without --root the real profile is used, and only `scan`, `plan`, `verify-journal` and the summary verbs are allowed.
 public static class DoctorCli
 {
     public static int Run(string[] args)
@@ -108,6 +110,15 @@ public static class DoctorCli
                     .SelectMany(f => DoctorJournal.UnapprovedDestructive(DoctorJournal.Read(f))).Count();
                 Console.WriteLine($"{{\"unapprovedDestructive\": {bad}}}");
                 return bad == 0 ? 0 : 1;
+            case "summary-prompt":
+            case "summary":
+            {
+                var report = JsonSerializer.Deserialize<DoctorReport>(
+                    File.ReadAllText(One("report") ?? throw new InvalidOperationException("--report <file> required")), DoctorFS.Json)!;
+                Console.WriteLine(verb == "summary" ? DoctorSummary.WriteAsync(report, One("model") ?? "haiku").GetAwaiter().GetResult()
+                                                    : DoctorSummary.Prompt(report));
+                break;
+            }
             default:
                 throw new InvalidOperationException($"unknown verb {verb}");
         }
