@@ -171,8 +171,8 @@ def build(fx):
                  runKey="HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\FixtureFishyUpdater")
         if os.environ.get("CI") == "true" and sys.platform == "win32":
             import winreg
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
-                                winreg.KEY_SET_VALUE) as k:
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
+                                    winreg.KEY_SET_VALUE) as k:   # a fresh runner profile may not have the key yet
                 winreg.SetValueEx(k, "FixtureFishyUpdater", 0, winreg.REG_SZ, f'"{fx.path(bin_rel)}"')
 
     # --- Malware test string, CI only -----------------------------------------------------------
