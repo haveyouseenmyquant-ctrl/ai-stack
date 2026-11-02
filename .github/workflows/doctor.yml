@@ -41,7 +41,13 @@ jobs:
           freshclam --stdout || true
           if ! works; then
             echo "restored DB does not detect EICAR; downloading it again"
-            rm -rf "$db"/*; freshclam --stdout
+            rm -rf "$db"/*; freshclam --stdout || true
+          fi
+          if ! works; then
+            # The published daily.cvd itself can fail its signature test (daily 28171 on 2026-11-02); then scan
+            # with main.cvd alone, which still holds the EICAR signature.
+            echo "daily.cvd is broken upstream; using main.cvd only"
+            rm -f "$db"/daily.*
             works
           fi
           echo "verified=true" >> "$GITHUB_OUTPUT"
