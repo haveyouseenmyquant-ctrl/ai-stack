@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject var settings: AppSettings
     @State private var claudePathDisplay = ""
+    @State private var showDoctorIntro = false
 
     private let models = [("haiku", "Haiku — fastest"), ("sonnet", "Sonnet — balanced"), ("opus", "Opus — best quality")]
 
@@ -55,6 +56,42 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Laptop Doctor") {
+                Toggle("Run a checkup on a schedule", isOn: Binding(
+                    get: { settings.doctorEnabled },
+                    set: { on in if on && !settings.doctorEnabled { showDoctorIntro = true } else { settings.doctorEnabled = on } }))
+                Picker("Day", selection: $settings.doctorWeekday) {
+                    ForEach(1...7, id: \.self) { Text(Calendar.current.weekdaySymbols[$0 - 1]).tag($0) }
+                }
+                Picker("Time", selection: $settings.doctorHour) {
+                    ForEach(0..<24, id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) }
+                }
+                Text("Only on mains power and when the Mac is idle. At most one approval request a day.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Free up local copies of synced cloud files", isOn: $settings.doctorEvictCloud)
+                Toggle("Compress cold files in place (they still open normally)", isOn: $settings.doctorCompress)
+                Toggle("Zip folders I mark for archiving", isOn: $settings.doctorArchive)
+                if settings.doctorArchive {
+                    ForEach(settings.doctorArchiveFolders, id: \.self) { folder in
+                        HStack {
+                            Text(folder).lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            Button { settings.doctorArchiveFolders.removeAll { $0 == folder } } label: { Image(systemName: "minus.circle") }
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                    Button("Add Folder to Archive When Unused…") { chooseArchiveFolder() }
+                }
+                ForEach(Self.doctorThresholdKeys, id: \.key) { t in
+                    Stepper(value: thresholdBinding(t.key, t.fallback), in: 7...365, step: t.key == "installerAgeDays" ? 1 : 15) {
+                        Text("\(t.label): \(thresholdBinding(t.key, t.fallback).wrappedValue) days")
+                    }
+                }
+                Toggle("Summarise each checkup with Claude", isOn: $settings.doctorClaudeSummary)
+                Text("The summary gets totals per category, your security settings and the names of startup items and busy processes. It never gets the names of your files or folders.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("Claude") {
                 HStack {
                     Text("Claude Code CLI")
@@ -75,12 +112,36 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showDoctorIntro) { DoctorIntroView(settings: settings, isPresented: $showDoctorIntro) }
         .frame(minWidth: 520, minHeight: 560)
         .onAppear {
             DispatchQueue.global().async {
                 let path = ClaudeCLI.shared.binaryPath() ?? "Not found"
                 DispatchQueue.main.async { claudePathDisplay = path }
             }
+        }
+    }
+
+    static let doctorThresholdKeys: [(key: String, label: String, fallback: Int)] = [
+        ("coldDays", "Compress files unused for", 60),
+        ("cloudColdDays", "Free cloud copies unopened for", 60),
+        ("archiveDays", "Archive marked folders unused for", 90),
+        ("installerAgeDays", "Suggest removing installers older than", 30),
+        ("inactiveProjectDays", "Suggest cleaning projects untouched for", 90),
+    ]
+
+    private func thresholdBinding(_ key: String, _ fallback: Int) -> Binding<Int> {
+        Binding(get: { settings.doctorThresholds[key] ?? fallback }, set: { settings.doctorThresholds[key] = $0 })
+    }
+
+    private func chooseArchiveFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        if panel.runModal() == .OK, let url = panel.url {
+            let path = (url.path as NSString).abbreviatingWithTildeInPath
+            if !settings.doctorArchiveFolders.contains(path) { settings.doctorArchiveFolders.append(path) }
         }
     }
 
@@ -98,5 +159,44 @@ struct SettingsView: View {
         if panel.runModal() == .OK, let url = panel.url {
             settings.notesFolder = (url.path as NSString).abbreviatingWithTildeInPath
         }
+    }
+}
+
+/// Shown once before Laptop Doctor is turned on: a plain list of what it will and won't ever do.
+struct DoctorIntroView: View {
+    @ObservedObject var settings: AppSettings
+    @Binding var isPresented: Bool
+
+    static let will = [
+        "Scan for malware (with ClamAV, if you installed it), weak security settings, slow startup items and busy processes.",
+        "Free disk space without losing anything: remove local copies of files already in your cloud storage, compress cold files in place, and zip folders you marked.",
+        "Record every change before making it, so each one can be undone from History.",
+        "Put everything else, such as deleting caches or old installers, into one plan that waits for your approval.",
+    ]
+    static let wont = [
+        "Delete anything without your approval. \u{201C}Delete\u{201D} always means moving to the Trash.",
+        "Touch system files, other users' files, passwords and keychains, Mail, Messages, Photos or browser profiles.",
+        "Change the inside of git repositories, or anything you changed in the last 7 days.",
+        "Turn off Gatekeeper, SIP, FileVault or the firewall.",
+        "Send the names of your files or folders to Claude.",
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Before you turn on Laptop Doctor").font(.title2.bold())
+            Text("It will").font(.headline)
+            ForEach(Self.will, id: \.self) { Label($0, systemImage: "checkmark.circle").foregroundStyle(.primary) }
+            Text("It will never").font(.headline)
+            ForEach(Self.wont, id: \.self) { Label($0, systemImage: "xmark.circle") }
+            Text("A full scan needs Full Disk Access. Without it, Laptop Doctor scans what it can and lists what it skipped.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Not Now") { isPresented = false }.keyboardShortcut(.cancelAction)
+                Button("Turn On") { settings.doctorEnabled = true; isPresented = false }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
     }
 }

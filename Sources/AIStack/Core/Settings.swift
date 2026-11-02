@@ -55,6 +55,20 @@ final class AppSettings: ObservableObject {
 
     @Published var claudePath: String { didSet { defaults.set(claudePath, forKey: "claude.path") } }
 
+    // Laptop Doctor: off until the user has read what it will and won't do (spec: BRIEF §3).
+    @Published var doctorEnabled: Bool { didSet { defaults.set(doctorEnabled, forKey: "doctor.enabled") } }
+    /// 1 = Sunday … 7 = Saturday (Calendar weekday), hour 0–23. Runs only on mains power and when idle.
+    @Published var doctorWeekday: Int { didSet { defaults.set(doctorWeekday, forKey: "doctor.weekday") } }
+    @Published var doctorHour: Int { didSet { defaults.set(doctorHour, forKey: "doctor.hour") } }
+    @Published var doctorEvictCloud: Bool { didSet { defaults.set(doctorEvictCloud, forKey: "doctor.tier1.evictCloud") } }
+    @Published var doctorCompress: Bool { didSet { defaults.set(doctorCompress, forKey: "doctor.tier1.compress") } }
+    @Published var doctorArchive: Bool { didSet { defaults.set(doctorArchive, forKey: "doctor.tier1.archive") } }
+    /// Folders the user marked "archive when unused for N days" (paths with ~).
+    @Published var doctorArchiveFolders: [String] { didSet { defaults.set(doctorArchiveFolders, forKey: "doctor.archiveFolders") } }
+    /// Overrides of the catalogue's N-day thresholds (coldDays, cloudColdDays, installerAgeDays, inactiveProjectDays).
+    @Published var doctorThresholds: [String: Int] { didSet { defaults.set(doctorThresholds, forKey: "doctor.thresholds") } }
+    @Published var doctorClaudeSummary: Bool { didSet { defaults.set(doctorClaudeSummary, forKey: "doctor.claudeSummary") } }
+
     var onboardingDone: Bool {
         get { defaults.bool(forKey: "onboarding.done") }
         set { defaults.set(newValue, forKey: "onboarding.done") }
@@ -78,6 +92,13 @@ final class AppSettings: ObservableObject {
             "notes.language": "en-GB",
             "notes.folder": "~/Documents/Meeting Notes",
             "claude.path": "",
+            "doctor.enabled": false,
+            "doctor.weekday": 1,
+            "doctor.hour": 11,
+            "doctor.tier1.evictCloud": true,
+            "doctor.tier1.compress": true,
+            "doctor.tier1.archive": true,
+            "doctor.claudeSummary": true,
         ])
         writingEnabled = defaults.bool(forKey: "writing.enabled")
         writingModel = defaults.string(forKey: "writing.model") ?? "haiku"
@@ -89,6 +110,15 @@ final class AppSettings: ObservableObject {
         notesLanguage = defaults.string(forKey: "notes.language") ?? "en-GB"
         notesFolder = defaults.string(forKey: "notes.folder") ?? "~/Documents/Meeting Notes"
         claudePath = defaults.string(forKey: "claude.path") ?? ""
+        doctorEnabled = defaults.bool(forKey: "doctor.enabled")
+        doctorWeekday = defaults.integer(forKey: "doctor.weekday")
+        doctorHour = defaults.integer(forKey: "doctor.hour")
+        doctorEvictCloud = defaults.bool(forKey: "doctor.tier1.evictCloud")
+        doctorCompress = defaults.bool(forKey: "doctor.tier1.compress")
+        doctorArchive = defaults.bool(forKey: "doctor.tier1.archive")
+        doctorArchiveFolders = defaults.stringArray(forKey: "doctor.archiveFolders") ?? []
+        doctorThresholds = defaults.dictionary(forKey: "doctor.thresholds") as? [String: Int] ?? [:]
+        doctorClaudeSummary = defaults.bool(forKey: "doctor.claudeSummary")
     }
 
     static func languageName(_ id: String) -> String {
