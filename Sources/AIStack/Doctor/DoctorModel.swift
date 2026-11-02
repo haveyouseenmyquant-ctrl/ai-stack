@@ -48,7 +48,10 @@ struct Finding: Codable {
     var bytes: Int64
     var reason: String
     var flag: String? = nil
+    /// Busy processes: the process name; startup items: the launchd label / Run value name.
     var processName: String? = nil
+    /// The program a startup item or process runs.
+    var executable: String? = nil
     var pid: Int32? = nil
     var fingerprint: Fingerprint? = nil
 

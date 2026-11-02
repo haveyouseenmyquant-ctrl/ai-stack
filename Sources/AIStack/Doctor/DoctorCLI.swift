@@ -9,6 +9,8 @@ import Foundation
 ///     AIStack --doctor execute --root <home> --plan plan.json --journal <file>
 ///     AIStack --doctor undo    --root <home> --journal <file> [--entry <id>]
 ///     AIStack --doctor recover --root <home> --journal <file>
+///     AIStack --doctor summary-prompt --report report.json   (exactly what the Claude summary would send)
+///     AIStack --doctor summary --report report.json [--model haiku]
 ///     AIStack --doctor verify-journal <file>…
 ///
 /// Without --root the real home folder is used, and only `scan`, `plan` and `verify-journal` are allowed
@@ -101,6 +103,16 @@ enum DoctorCLI {
         case "recover":
             let j = try journal()
             print("recovered \(executor(j).recover(records: DoctorJournal.read(j.path)))")
+        case "summary-prompt", "summary":
+            guard let p = o.one("report") else { throw UsageError(description: "--report <file> required") }
+            let report = try JSONDecoder().decode(DoctorReport.self, from: Data(contentsOf: URL(fileURLWithPath: p)))
+            guard verb == "summary" else { print(try DoctorSummary.prompt(report)); return 0 }
+            let model = o.one("model") ?? "haiku"
+            let done = DispatchSemaphore(value: 0)
+            var result: Result<String, Error> = .failure(UsageError(description: "no reply"))
+            Task.detached { do { result = .success(try await DoctorSummary.write(report, model: model)) } catch { result = .failure(error) }; done.signal() }
+            done.wait()
+            print(try result.get())
         case "verify-journal":
             let files = o.positional + (o.values["journal"] ?? [])
             let bad = files.flatMap { DoctorJournal.unapprovedDestructive(DoctorJournal.read($0)) }

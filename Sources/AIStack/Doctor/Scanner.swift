@@ -44,7 +44,7 @@ struct DoctorScanner {
                 out += busyProcesses().map {
                     Finding(id: Finding.itemId(c.id, "pid:\($0.pid):\($0.name)"), category: c.id, action: c.action,
                             tier: catalogue.tier(of: c), path: $0.path, bytes: 0,
-                            reason: String(format: "%.0f%% CPU", $0.cpu), processName: $0.name, pid: $0.pid)
+                            reason: String(format: "%.0f%% CPU", $0.cpu), processName: $0.name, executable: $0.path, pid: $0.pid)
                 }
             default: skipped.append("unknown matcher \(c.match.kind) in \(c.id)")
             }
@@ -58,8 +58,10 @@ struct DoctorScanner {
                     }
                     continue
                 }
-                out.append(Finding(id: Finding.itemId(c.id, path), category: c.id, action: c.action, tier: catalogue.tier(of: c),
-                                   path: path, bytes: bytes, reason: reason, flag: flag, fingerprint: DoctorFS.fingerprint(path)))
+                var f = Finding(id: Finding.itemId(c.id, path), category: c.id, action: c.action, tier: catalogue.tier(of: c),
+                                path: path, bytes: bytes, reason: reason, flag: flag, fingerprint: DoctorFS.fingerprint(path))
+                if c.match.kind == "startupItems" { (f.processName, f.executable) = Self.launchAgentJob(path) }
+                out.append(f)
             }
         }
         return out
@@ -190,6 +192,13 @@ struct DoctorScanner {
         }
     }
 
+    /// A LaunchAgent's label and program, for the report and the summary.
+    static func launchAgentJob(_ plist: String) -> (String?, String?) {
+        guard let dict = NSDictionary(contentsOfFile: plist) else { return (nil, nil) }
+        return (dict["Label"] as? String ?? ((plist as NSString).lastPathComponent as NSString).deletingPathExtension,
+                (dict["Program"] as? String) ?? (dict["ProgramArguments"] as? [String])?.first)
+    }
+
     // MARK: Malware: an optional, user-installed ClamAV (never bundled)
 
     /// The user's own clamscan. With --root, LD_CLAMSCAN=<path>|off overrides it (test hook).
@@ -247,7 +256,11 @@ struct DoctorScanner {
             if testRoot && !v.1.contains(home) { return nil }
             let words = v.1.split(separator: " ").map(String.init)
             let script = words.dropFirst().first { [".py", ".js", ".sh", ".rb"].contains("." + ($0 as NSString).pathExtension) }
-            let exe = script ?? words[0]
+            // `ps` joins argv with spaces, so a script path with spaces is rebuilt from the last " /" before it.
+            var exe = script ?? words[0]
+            if let s = script, let end = v.1.range(of: s), let start = v.1[..<end.lowerBound].range(of: " /", options: .backwards) {
+                exe = String(v.1[v.1.index(after: start.lowerBound)..<end.upperBound])
+            }
             return Busy(pid: pid, cpu: (first.0 + v.0) / 2, name: (exe as NSString).lastPathComponent, path: exe)
         }
     }

@@ -227,3 +227,23 @@ One call per checkup through the existing `ClaudeCLI` / `ClaudeCli` (haiku). The
   - Undo: restore the pin bits first (else the provider frees the file again), then `CfHydratePlaceholder` and check the SHA-256.
   - Recover of an `intent`: restore the pin bits first, then look: evicted → `done` (Undo can download it), local → `failed`.
   - The test provider polls its root every 200 ms and dehydrates unpinned files in its own process: `CfUpdatePlaceholder(DEHYDRATE)` on a `CfOpenFileWithOplock` exclusive handle, falling back to `CfDehydratePlaceholder`. It logs which call worked to stderr.
+
+## 15. Claude summary, macOS (session 11, 2026-11-02)
+
+- `Doctor/Summary.swift`. `DoctorSummary.facts(report)` is the only code that decides what Claude sees. It sends:
+  - per-category count and bytes (category ids come from our catalogue, not from the user)
+  - the security settings
+  - a malware detection count, and how many areas weren't scanned (counts only; skip notes can hold paths)
+  - for startup items: the launchd label, the signature flag and the program
+  - for busy processes: the process name, CPU % and the program
+- A program path is sent as-is only when it is absolute and outside the home folder (e.g. `/Applications/Dropbox.app/...`). Otherwise it becomes `~/…/<name>`.
+- `Finding` gained `executable`. Startup items also fill `processName` with their label.
+- CLI: `--doctor summary-prompt --report r.json` prints exactly what would be sent. `--doctor summary` sends it through `ClaudeCLI` (haiku, low effort). CI never calls Claude.
+- Safety test `t_summary_sends_no_user_names` (macOS). It scans the fixture with the CPU burner running and builds the prompt. It checks that the prompt lists the startup items and the process, and that it contains no name of any file or folder in the fixture. The exceptions are standard folders and the process, label and program names the summary is allowed to send.
+  - The test found a real leak on its first run. `ps` joins argv with spaces, so the scanner had cut the burner's path to `Support/BusyHelper/busyhelper.py`, a relative fragment that the redaction didn't recognise. Both are fixed: the scanner rebuilds the path from the last ` /`, and anything not absolute is redacted.
+- Windows port: same facts struct in C#. Until then the test runs on macOS only.
+- Tier 1 KPI ceiling: `eligible` is the logical size of the eligible files. Compression can't free all of a file's bytes, so about 74% is the honest maximum for this fixture. The definition stays as it is.
+
+## 16. ClamAV in CI (session 11)
+
+Homebrew's ClamAV 1.5.4 bottle on macOS runners rejects the signature of every published CVD, main.cvd included ("cli_loadinfo: Incorrect digital signature"; freshclam: "NULL X509 store"). So clamscan loads no database and EICAR is missed. CI therefore turns off freshclam's `TestDatabases`, and unpacks each CVD (a 512-byte header plus a tarball) into plain signature files in the same database folder, without the `.info` files. clamscan loads plain files without the signature check. The signatures are ClamAV's own; nothing is hand-written. bytecode.cvd is dropped (unsigned bytecode needs a flag, and EICAR doesn't need it). This is a CI workaround only. On users' machines the Doctor still uses whatever their ClamAV loads, and reports clamscan failures as skipped.

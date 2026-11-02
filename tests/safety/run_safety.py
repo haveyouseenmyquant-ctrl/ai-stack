@@ -478,6 +478,33 @@ def t_traps_untouched(c, res):
             assert k not in comp, f"trap {t['id']} was compressed: {k}"
 
 
+def t_summary_sends_no_user_names(c, res):
+    """The Claude summary's prompt names startup items and processes, never the user's files or folders."""
+    home, exp, j, out = c.fixture()
+    burner = [x for x in exp["planted"] if x["kind"] == "busy-process"]
+    procs = [subprocess.Popen([sys.executable, os.path.join(home, *b["path"].split("/"))]) for b in burner]
+    try:
+        time.sleep(3)
+        report = os.path.join(out, "report-summary.json")
+        c.doctor("scan", "--root", home, "--archive", ARCHIVE, "--out", report)
+    finally:
+        for pr in procs:
+            pr.kill()
+    prompt = c.doctor("summary-prompt", "--report", report).stdout
+    facts = json.loads(prompt[prompt.index("{"):])
+    assert facts["startupItems"] and facts["processes"] and facts["findings"], f"summary facts are empty: {facts}"
+    allowed = {"Library", "Caches", "LaunchAgents", "Documents", "Downloads", "Desktop", "Projects", "Code",
+               "AppData", "Local", "Roaming", ".Trash"}
+    for f in load(report)["findings"]:   # what the summary may name: process/job names and their programs
+        allowed |= {f.get("processName") or "", os.path.basename(f.get("executable") or "")}
+    names = set()
+    for r, ds, fs in os.walk(home):
+        names |= {n for n in ds + fs if len(n) >= 4}
+    leaked = sorted(n for n in names - allowed if n in prompt)
+    assert not leaked, f"summary prompt contains user file/folder names: {leaked[:5]}"
+    assert os.path.basename(home) not in prompt and home not in prompt, "summary prompt contains the home path"
+
+
 def t_writes_need_root(c, res):
     r = c.doctor("tier1", "--journal", os.path.join(c.work, "x.jsonl"), check=False)
     assert r.returncode != 0, "tier1 ran without --root"
@@ -517,7 +544,7 @@ SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_arch
           t_crash_points_compress if WINDOWS else t_quarantine_roundtrip_and_crash_points,
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
-          t_writes_need_root] + ([t_evict_cloud_roundtrip] if WINDOWS else [])
+          t_writes_need_root] + ([t_evict_cloud_roundtrip] if WINDOWS else [t_summary_sends_no_user_names])
 
 
 def main():
