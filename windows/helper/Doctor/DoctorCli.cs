@@ -8,6 +8,8 @@ namespace AIStack.Doctor;
 ///     AIStackHelper --doctor tier1   --root <home> --journal <file> [--archive <folder>]…
 ///     AIStackHelper --doctor plan    [--root <home>] [--dry-run] --out plan.json
 ///     AIStackHelper --doctor approve --plan plan.json --journal <file> [--items id,id | --all] [--by user|rule:<id>]
+///     AIStackHelper --doctor decline --plan plan.json --journal <file> [--items id,id | --all]
+///     AIStackHelper --doctor rule-add --root <home> --dir <checkups dir> --category <id>   ("always do this"; ruleable kinds only)
 ///     AIStackHelper --doctor execute --root <home> --plan plan.json --journal <file>
 ///     AIStackHelper --doctor undo    --root <home> --journal <file> [--entry <id>]
 ///     AIStackHelper --doctor recover --root <home> --journal <file>
@@ -50,7 +52,7 @@ public static class DoctorCli
         var catalogue = DoctorCatalogue.Load(One("catalogue"));
         var checkup = One("checkup") ?? DoctorFS.Iso();
         var archive = (values.GetValueOrDefault("archive") ?? new()).Select(p => Path.IsPathRooted(p) ? p : Path.Combine(home, p)).ToList();
-        if (verb is "tier1" or "checkup" or "approve" or "execute" or "undo" or "recover" && root == null)
+        if (verb is "tier1" or "checkup" or "approve" or "decline" or "rule-add" or "execute" or "undo" or "recover" && root == null)
             throw new InvalidOperationException($"{verb} needs --root <fixture home>; real-profile writes are not enabled");
         if (root != null && !Directory.Exists(home)) throw new InvalidOperationException($"no such root {home}");
 
@@ -112,6 +114,26 @@ public static class DoctorCli
                 var items = plan.Groups.SelectMany(g => g.Items).Where(i => flags.Contains("all") || ids.Contains(i.Id)).ToList();
                 Executor(Journal()).Approve(items, One("by") ?? "user");
                 Console.WriteLine($"approved {items.Count}");
+                break;
+            }
+            case "decline":
+            {
+                var plan = LoadPlan();
+                var ids = (One("items") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+                var items = plan.Groups.SelectMany(g => g.Items).Where(i => flags.Contains("all") || ids.Contains(i.Id)).ToList();
+                Executor(Journal()).Decline(items, "user");
+                Console.WriteLine($"declined {items.Count}");
+                break;
+            }
+            case "rule-add":
+            {
+                var dir = One("dir") ?? throw new InvalidOperationException("--dir required");
+                var cat = One("category") ?? throw new InvalidOperationException("--category required");
+                var book = DoctorRuleBook.Load(Path.Combine(dir, "rules.json"), catalogue);
+                var rule = book.Add(cat, catalogue);
+                Directory.CreateDirectory(dir);
+                Emit(book, Path.Combine(dir, "rules.json"));
+                Emit(rule, null);
                 break;
             }
             case "execute":

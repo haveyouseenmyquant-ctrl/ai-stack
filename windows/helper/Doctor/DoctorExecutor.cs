@@ -514,6 +514,14 @@ public class DoctorExecutor
         }
     }
 
+    /// "Decline": the item stays off later plans until its target changes. Nothing on disk is touched.
+    public void Decline(List<Finding> items, string by)
+    {
+        foreach (var f in items.Where(f => f.Action.Tier() == DoctorTier.Plan))
+            journal.Append(new JournalRecord { Id = DoctorJournal.NewId(), Checkup = checkup, Phase = "decline", Action = f.Action, Tier = 2,
+                                               PlanItem = f.Id, From = f.Path, Fingerprint = f.Fingerprint, By = by });
+    }
+
     public Outcome Execute(TreatmentPlan plan, List<JournalRecord> approvals)
     {
         var o = new Outcome();

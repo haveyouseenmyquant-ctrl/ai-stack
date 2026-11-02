@@ -10,7 +10,7 @@ public class JournalRecord
     public string Id { get; set; } = "";
     public string Checkup { get; set; } = "";
     public string Ts { get; set; } = DoctorFS.Iso();
-    public string Phase { get; set; } = "";   // intent|done|failed|skipped|refused|approval|undo-intent|undo-done|undo-failed
+    public string Phase { get; set; } = "";   // intent|done|failed|skipped|refused|approval|decline|undo-intent|undo-done|undo-failed
     public DoctorAction Action { get; set; }
     public int Tier { get; set; }
     public string? PlanItem { get; set; }

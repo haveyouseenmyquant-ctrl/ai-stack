@@ -23,7 +23,7 @@ extension DoctorCatalogue {
 }
 
 /// One checkup: recover an interrupted run → scan → Tier 1 (only the switched-on kinds) → treatment plan.
-/// Writes report.json, plan.json and outcome.json to `<dir>/<checkup id>/`. Used by the scheduler and `--doctor checkup`.
+/// Writes report.json, plan.json and outcome.json to `<dir>/<checkup id>/`, and keeps `<dir>/pending.json`; reads `<dir>/rules.json`. Used by the scheduler and `--doctor checkup`.
 enum DoctorCheckup {
     struct Result: Codable {
         var checkup: String
@@ -32,6 +32,10 @@ enum DoctorCheckup {
         var tier1Disabled: Int      // Tier 1 findings left alone because their switch is off
         var planItems: Int
         var planBytes: Int64
+        var carried = 0          // undecided items from earlier plans, still valid
+        var expired = 0          // carried items dropped: older than 30 days, or their target changed or is gone
+        var suppressed = 0       // already approved or declined for the same contents
+        var ruled: DoctorExecutor.Outcome? = nil   // items an "always do this" rule approved and ran
     }
 
     static func run(home: String, catalogue base: DoctorCatalogue, options: DoctorCheckupOptions, journal: DoctorJournal,
@@ -44,7 +48,21 @@ enum DoctorCheckup {
         let enabled = findings.filter { $0.action.tier == .automatic && options.tier1.contains($0.action) }
         let disabled = findings.filter { $0.action.tier == .automatic && !options.tier1.contains($0.action) }.count
         let outcome = ex.runTier1(enabled)
-        let plan = DoctorCLI.makePlan(findings, catalogue: catalogue, checkup: checkup, root: home)
+        // Carry over undecided items, then let the user's rules approve their kinds. Ruled items still go through
+        // execute(): the never-list, the approval check and the re-check that the target is unchanged.
+        let records = DoctorJournal.read(journal.path)
+        let merged = DoctorPendingBook.load(dir + "/pending.json").merge(fresh: findings, records: records, now: checkup)
+        let rules = DoctorRuleBook.load(dir + "/rules.json", catalogue: catalogue)
+        var ruledItems: [Finding] = [], left: [Finding] = []
+        for f in merged.items { if let r = rules.rule(for: f) { ruledItems.append(f); ex.approve([f], by: "rule:" + r.id) } else { left.append(f) } }
+        var ruled: DoctorExecutor.Outcome? = nil
+        if !ruledItems.isEmpty {
+            let sub = DoctorCLI.makePlan(ruledItems, catalogue: catalogue, checkup: checkup, root: home)
+            ruled = ex.execute(sub, approvals: DoctorJournal.read(journal.path).filter { $0.checkup == checkup })
+        }
+        var pending = merged.book
+        pending.items.removeAll { e in ruledItems.contains { $0.id == e.item.id } }
+        let plan = DoctorCLI.makePlan(left, catalogue: catalogue, checkup: checkup, root: home)
         let report = DoctorReport(generatedAt: checkup, root: home, dryRun: false, findings: findings, skipped: scanner.skipped,
                                   posture: testRoot ? [:] : DoctorScanner.posture())
 
@@ -52,10 +70,12 @@ enum DoctorCheckup {
         try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
         let items = plan.groups.flatMap(\.items)
         let result = Result(checkup: checkup, folder: folder, tier1: outcome, tier1Disabled: disabled,
-                            planItems: items.count, planBytes: items.reduce(0) { $0 + $1.bytes })
+                            planItems: items.count, planBytes: items.reduce(0) { $0 + $1.bytes },
+                            carried: merged.carried, expired: merged.expired, suppressed: merged.suppressed, ruled: ruled)
         try DoctorCLI.emit(report, folder + "/report.json")
         try DoctorCLI.emit(plan, folder + "/plan.json")
         try DoctorCLI.emit(result, folder + "/outcome.json")
+        try DoctorCLI.emit(pending, dir + "/pending.json")
         return result
     }
 }

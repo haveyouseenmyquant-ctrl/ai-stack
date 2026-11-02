@@ -6,7 +6,7 @@ struct JournalRecord: Codable {
     var id: String
     var checkup: String
     var ts: String = DoctorFS.iso()
-    var phase: String   // intent|done|failed|skipped|refused|approval|undo-intent|undo-done|undo-failed
+    var phase: String   // intent|done|failed|skipped|refused|approval|decline|undo-intent|undo-done|undo-failed
     var action: DoctorAction
     var tier: Int
     var planItem: String? = nil

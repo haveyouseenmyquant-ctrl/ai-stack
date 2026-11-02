@@ -541,6 +541,62 @@ def t_checkup_respects_switches(c, res):
     assert not diff(before, snapshot(home), "all"), "undo after checkups did not restore the tree"
 
 
+def t_plans_carry_over_and_rules(c, res):
+    """Undecided items carry over (once each) and age out after 30 days; declined items stay off; rules only for
+    reversible kinds (a hand-edited rules.json can't widen them); ruled items run through execute() and undo."""
+    import datetime
+    home, exp, j, out = c.fixture()
+    d = os.path.join(out, "checkups")
+    def checkup(*a, at=None):
+        extra = ["--checkup", at] if at else []
+        r = json.loads(c.doctor("checkup", "--root", home, "--journal", j, "--dir", d, "--tier1", *extra, *a).stdout)
+        return r, load(os.path.join(r["folder"], "plan.json"))
+    def ids(p, cat=None):
+        return [i["id"] for i in items(p) if cat is None or i["category"] == cat]
+    r1, p1 = checkup()
+    pend = load(os.path.join(d, "pending.json"))["items"]
+    assert r1["planItems"] == len(pend) == len({e["item"]["id"] for e in pend}) > 0, "pending is not one entry per plan item"
+    # Decline one item: it stays off the next plan while unchanged, and the rest are not duplicated.
+    gone = ids(p1, "duplicate")[0]
+    c.doctor("decline", "--root", home, "--plan", os.path.join(r1["folder"], "plan.json"), "--journal", j, "--items", gone)
+    r2, p2 = checkup()
+    assert gone not in ids(p2) and r2["suppressed"] >= 1, "a declined item came back unchanged"
+    assert sorted(ids(p2)) == sorted(set(ids(p1)) - {gone}), "second plan is not the first minus the declined item"
+    # Installers the scan no longer flags (higher threshold) are carried over, then age out after 30 days.
+    inst = set(ids(p1, "downloads-installer"))
+    assert inst, "fixture has no installers"
+    r3, p3 = checkup("--threshold", "installerAgeDays=5000")
+    assert inst <= set(ids(p3)) and r3["carried"] >= len(inst), "undecided installers did not carry over"
+    later = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=31)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    r4, p4 = checkup("--threshold", "installerAgeDays=5000", at=later)
+    assert not inst & set(ids(p4)) and r4["expired"] >= len(inst), "carried items older than 30 days did not age out"
+    # Rules: never for emptying the Trash or quitting processes, and a hand-edited rules.json can't add them.
+    for cat in ("trash", "busy-process", "cold-compressible"):
+        assert c.doctor("rule-add", "--root", home, "--dir", d, "--category", cat, check=False).returncode != 0, f"rule for {cat} allowed"
+    c.doctor("rule-add", "--root", home, "--dir", d, "--category", "cache")
+    rb = load(os.path.join(d, "rules.json"))
+    rb["rules"] += [{"id": "r-forged", "category": "trash", "created": "x"}, {"id": "r-forged2", "category": "busy-process", "created": "x"}]
+    json.dump(rb, open(os.path.join(d, "rules.json"), "w"))
+    caches = [i for i in items(p2) if i["category"] == "cache"]
+    assert caches, "fixture has no cache items"
+    before = snapshot(home, skip_trash=True)
+    r5, p5 = checkup()
+    assert (r5.get("ruled") or {}).get("done") == len(caches), f"cache rule did not run: {r5}"
+    assert not ids(p5, "cache"), "ruled items left on the plan"
+    for cat in ("trash", "busy-process"):
+        assert ids(p5, cat) or not ids(p2, cat), f"a forged rule approved {cat}"
+    recs = [json.loads(l) for l in open(j)]
+    by_rule = [x for x in recs if x["phase"] == "approval" and (x.get("by") or "").startswith("rule:")]
+    assert by_rule and all(x["action"] == "moveToTrash" for x in by_rule), "a rule approved something other than a Trash move"
+    assert all(not x["by"].startswith("rule:r-forged") for x in by_rule), "a forged rule was used"
+    after = snapshot(home, skip_trash=True)
+    moved = set(diff(before, after, "hash"))
+    touched = [t["path"] for t in exp["mustNotTouch"] if any(m == t["path"] or m.startswith(t["path"] + "/") for m in moved)]
+    assert not touched, f"rule run touched {touched}"
+    c.doctor("undo", "--root", home, "--journal", j)
+    assert not diff(before, snapshot(home, skip_trash=True), "hash"), "undo did not restore the ruled Trash moves"
+
+
 def t_schedule_once_per_slot(c, res):
     """Weekly slot Sunday 11:00 UTC (2026-11-01 is a Sunday); at most one approval request a day."""
     def due(now, last=None, notified=None):
@@ -597,7 +653,8 @@ SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_arch
           t_crash_points_compress if WINDOWS else t_quarantine_roundtrip_and_crash_points,
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
-          t_writes_need_root, t_summary_sends_no_user_names, t_checkup_respects_switches, t_schedule_once_per_slot] + ([t_evict_cloud_roundtrip] if WINDOWS else [])
+          t_writes_need_root, t_summary_sends_no_user_names, t_checkup_respects_switches, t_schedule_once_per_slot,
+          t_plans_carry_over_and_rules] + ([t_evict_cloud_roundtrip] if WINDOWS else [])
 
 
 def main():

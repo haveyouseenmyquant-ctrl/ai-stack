@@ -416,6 +416,14 @@ final class DoctorExecutor {
         }
     }
 
+    /// "Decline": the item stays off later plans until its target changes. Nothing on disk is touched.
+    func decline(_ items: [Finding], by: String) {
+        for f in items where f.action.tier == .plan {
+            try? journal.append(JournalRecord(id: DoctorJournal.newId(), checkup: checkup, phase: "decline", action: f.action,
+                                              tier: 2, planItem: f.id, from: f.path, fingerprint: f.fingerprint, by: by))
+        }
+    }
+
     func execute(_ plan: TreatmentPlan, approvals: [JournalRecord]) -> Outcome {
         var o = Outcome()
         let approved = Dictionary(approvals.filter { $0.phase == "approval" }.compactMap { r in r.planItem.map { ($0, r) } },

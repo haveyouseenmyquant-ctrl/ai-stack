@@ -6,6 +6,8 @@ import Foundation
 ///     AIStack --doctor tier1   --root <home> --journal <file> [--archive <folder>]…
 ///     AIStack --doctor plan    [--root <home>] [--dry-run] --out plan.json
 ///     AIStack --doctor approve --plan plan.json --journal <file> [--items id,id | --all] [--by user|rule:<id>]
+///     AIStack --doctor decline --plan plan.json --journal <file> [--items id,id | --all]
+///     AIStack --doctor rule-add --root <home> --dir <checkups dir> --category <id>   ("always do this"; ruleable kinds only)
 ///     AIStack --doctor execute --root <home> --plan plan.json --journal <file>
 ///     AIStack --doctor undo    --root <home> --journal <file> [--entry <id>]
 ///     AIStack --doctor recover --root <home> --journal <file>
@@ -57,7 +59,7 @@ enum DoctorCLI {
         let catalogue = try DoctorCatalogue.load(o.one("catalogue"))
         let checkup = o.one("checkup") ?? DoctorFS.iso()
         let archive = (o.values["archive"] ?? []).map { $0.hasPrefix("/") ? $0 : home + "/" + $0 }
-        let writing = ["tier1", "checkup", "approve", "execute", "undo", "recover"].contains(verb)
+        let writing = ["tier1", "checkup", "approve", "decline", "rule-add", "execute", "undo", "recover"].contains(verb)
         if writing && root == nil { throw UsageError(description: "\(verb) needs --root <fixture home>; real-home writes are not enabled") }
         if root != nil && !FileManager.default.fileExists(atPath: home) { throw UsageError(description: "no such root \(home)") }
 
@@ -118,6 +120,19 @@ enum DoctorCLI {
             let items = plan.groups.flatMap(\.items).filter { o.flags.contains("all") || ids.contains($0.id) }
             executor(try journal()).approve(items, by: o.one("by") ?? "user")
             print("approved \(items.count)")
+        case "decline":
+            let plan = try loadPlan()
+            let ids = Set((o.one("items") ?? "").split(separator: ",").map(String.init))
+            let items = plan.groups.flatMap(\.items).filter { o.flags.contains("all") || ids.contains($0.id) }
+            executor(try journal()).decline(items, by: "user")
+            print("declined \(items.count)")
+        case "rule-add":
+            guard let dir = o.one("dir"), let cat = o.one("category") else { throw UsageError(description: "--dir and --category required") }
+            var book = DoctorRuleBook.load(dir + "/rules.json", catalogue: catalogue)
+            let r = try book.add(cat, catalogue: catalogue)
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try emit(book, dir + "/rules.json")
+            try emit(r, nil)
         case "execute":
             let j = try journal()
             try emit(executor(j).execute(try loadPlan(), approvals: DoctorJournal.read(j.path)), nil)

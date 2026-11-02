@@ -18,7 +18,10 @@ public static class DoctorCheckup
     /// The N-day thresholds a user may change. Other defaults (compression gain, the 7-day rule) stay fixed.
     public static readonly HashSet<string> UserDayKeys = new() { "coldDays", "cloudColdDays", "archiveDays", "installerAgeDays", "inactiveProjectDays" };
 
-    public record Result(string Checkup, string Folder, DoctorExecutor.Outcome Tier1, int Tier1Disabled, int PlanItems, long PlanBytes);
+    /// Carried: undecided items from earlier plans; Expired: carried items older than 30 days or whose target changed
+    /// or is gone; Suppressed: already approved or declined for the same contents; Ruled: what "always" rules ran.
+    public record Result(string Checkup, string Folder, DoctorExecutor.Outcome Tier1, int Tier1Disabled, int PlanItems, long PlanBytes,
+                         int Carried, int Expired, int Suppressed, DoctorExecutor.Outcome? Ruled);
 
     public static Result Run(string home, DoctorCatalogue catalogue, DoctorCheckupOptions options, DoctorJournal journal,
                              string dir, bool testRoot, string checkup)
@@ -32,16 +35,32 @@ public static class DoctorCheckup
         var findings = scanner.Scan();
         var auto = findings.Where(f => f.Action.Tier() == DoctorTier.Automatic).ToList();
         var outcome = ex.RunTier1(auto.Where(f => options.Tier1.Contains(f.Action)).ToList());
-        var plan = DoctorCli.MakePlan(findings, catalogue, checkup, home);
+        // Carry over undecided items, then let the user's rules approve their kinds. Ruled items still go through
+        // Execute(): the never-list, the approval check and the re-check that the target is unchanged.
+        var merged = DoctorPendingBook.Load(Path.Combine(dir, "pending.json")).MergeWith(findings, DoctorJournal.Read(journal.Path), checkup);
+        var rules = DoctorRuleBook.Load(Path.Combine(dir, "rules.json"), catalogue);
+        var ruledItems = new List<Finding>();
+        var left = new List<Finding>();
+        foreach (var f in merged.Items)
+            if (rules.RuleFor(f) is { } r) { ruledItems.Add(f); ex.Approve(new() { f }, "rule:" + r.Id); } else left.Add(f);
+        DoctorExecutor.Outcome? ruled = null;
+        if (ruledItems.Count > 0)
+            ruled = ex.Execute(DoctorCli.MakePlan(ruledItems, catalogue, checkup, home),
+                               DoctorJournal.Read(journal.Path).Where(x => x.Checkup == checkup).ToList());
+        var ruledIds = ruledItems.Select(f => f.Id).ToHashSet();
+        merged.Book.Items.RemoveAll(e => ruledIds.Contains(e.Item.Id));
+        var plan = DoctorCli.MakePlan(left, catalogue, checkup, home);
         var report = new DoctorReport(1, checkup, home, false, findings, scanner.Skipped, testRoot ? new() : DoctorScanner.Posture());
 
         var folder = Path.Combine(dir, checkup.Replace(":", "-"));
         Directory.CreateDirectory(folder);
         var items = plan.Groups.SelectMany(g => g.Items).ToList();
-        var result = new Result(checkup, folder, outcome, auto.Count(f => !options.Tier1.Contains(f.Action)), items.Count, items.Sum(i => i.Bytes));
+        var result = new Result(checkup, folder, outcome, auto.Count(f => !options.Tier1.Contains(f.Action)), items.Count, items.Sum(i => i.Bytes),
+                                merged.Carried, merged.Expired, merged.Suppressed, ruled);
         DoctorCli.Emit(report, Path.Combine(folder, "report.json"));
         DoctorCli.Emit(plan, Path.Combine(folder, "plan.json"));
         DoctorCli.Emit(result, Path.Combine(folder, "outcome.json"));
+        DoctorCli.Emit(merged.Book, Path.Combine(dir, "pending.json"));
         return result;
     }
 }
