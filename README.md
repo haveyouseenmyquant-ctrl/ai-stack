@@ -56,11 +56,12 @@ While a call is being recorded, a small pill sits in the corner of the call page
 
 ### 🩺 Laptop Doctor: a weekly checkup that never deletes on its own
 
-- **Off until you turn it on** in Settings → Laptop Doctor. It first shows a plain list of what it will and will never do.
+- **Off until you turn it on**: on macOS in Settings → Laptop Doctor, on Windows from the extension popup (**Laptop Doctor → Open**, then the Settings tab). It first shows a plain list of what it will and will never do.
 - **On the day and hour you pick**, plugged in and idle, it looks for malware and weak security settings, startup items and busy processes you don't use, and space you can get back.
 - **Automatic fixes lose nothing and can all be undone**: transparent compression of cold files, freeing local copies of files already in your cloud storage, zipping folders you opted in. Each switch is separate.
 - **Everything else waits for you** in one treatment plan, grouped by kind with sizes: approve a group, untick single items, decline, or "always do this" for reversible kinds. Deleting means moving to the Trash.
 - **History** lists every change, with Undo per item and per checkup.
+- **Rules** you made with "always do this" are listed in Settings and can be removed at any time.
 - Never touches system files, other users' files, keychains, mail, photos, browser profiles, git repositories, or anything changed in the last 7 days.
 - Optional plain-English summary by Claude, which gets counts, sizes and program names, never the names of your files or folders.
 
