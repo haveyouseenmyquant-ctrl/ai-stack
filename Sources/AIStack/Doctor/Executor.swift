@@ -26,7 +26,8 @@ final class DoctorExecutor {
             switch f.action {
             case .compress: tally(&o, compress(f))
             case .archiveFolder: tally(&o, archiveFolder(f))
-            case .evictCloud, .quarantine:
+            case .quarantine: tally(&o, quarantine(f))
+            case .evictCloud:
                 // Not implemented yet: journalled as skipped so nothing happens silently.
                 log(f, phase: "skipped", reason: "not implemented yet"); o.skipped += 1
             case .report, .moveToTrash, .emptyTrash, .disableStartupItem, .disableBrowserExtension,
@@ -93,6 +94,80 @@ final class DoctorExecutor {
         rec.phase = "done"; rec.after = after; rec.freedBytes = freed; rec.ts = DoctorFS.iso(); rec.temp = nil
         try? journal.append(rec)
         return ("done", freed)
+    }
+
+    // MARK: Quarantine a file ClamAV flagged
+
+    /// `~/Library/Application Support/AIStack/Doctor/Quarantine/<id>/<name>`: same volume as the home, so the move is one
+    /// atomic rename (the file is always at exactly one of the two paths). Then the execute bits are removed.
+    func quarantineDir(_ id: String) -> String { home + "/Library/Application Support/AIStack/Doctor/Quarantine/" + id }
+
+    func quarantine(_ f: Finding) -> (String, Int64) {
+        let path = f.path
+        if let why = guardian.refusal(path) { log(f, phase: "refused", reason: why); return ("refused", 0) }
+        guard let before = Self.state(path), DoctorFS.lstat(path).map({ $0.st_mode & S_IFMT == S_IFREG }) == true else {
+            log(f, phase: "skipped", reason: "missing or not a file"); return ("skipped", 0)
+        }
+        if let fp = f.fingerprint, fp.size != before.size || (fp.sha256 != nil && fp.sha256 != before.sha256) {
+            log(f, phase: "skipped", reason: "changed since scan"); return ("skipped", 0)
+        }
+        if Self.isOpen(path) { log(f, phase: "skipped", reason: "open in another process"); return ("skipped", 0) }
+        let id = DoctorJournal.newId()
+        let dir = quarantineDir(id), dest = dir + "/" + (path as NSString).lastPathComponent
+        var rec = JournalRecord(id: id, checkup: checkup, phase: "intent", action: .quarantine, tier: 1, planItem: f.id,
+                                from: path, to: dest, temp: dest, before: before, reason: f.reason)
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try journal.append(rec)
+        } catch { return ("failed", 0) }
+        crashPoint("quarantine-intent")
+        guard rename(path, dest) == 0 else {
+            rec.phase = "failed"; rec.reason = "rename errno \(errno)"; rec.ts = DoctorFS.iso(); try? journal.append(rec)
+            return ("failed", 0)
+        }
+        crashPoint("quarantine-moved")
+        chmod(dest, mode_t(before.mode & ~0o111))
+        rec.phase = "done"; rec.after = Self.state(dest, hash: false); rec.freedBytes = 0; rec.temp = nil; rec.ts = DoctorFS.iso()
+        try? journal.append(rec)
+        return ("done", 0)
+    }
+
+    private func unquarantine(_ r: JournalRecord) -> Bool {
+        guard let path = r.from, let dest = r.to, let before = r.before else { return false }
+        if let why = guardian.refusal(path, forWrite: false), why != "missing" { appendUndo(r, "undo-failed", why); return false }
+        guard DoctorFS.lstat(path) == nil else { appendUndo(r, "undo-failed", "something else is at the original path now"); return false }
+        guard Self.state(dest)?.sha256 == before.sha256 else { appendUndo(r, "undo-failed", "quarantined copy missing or changed"); return false }
+        appendUndo(r, "undo-intent", nil, temp: dest)
+        try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        guard rename(dest, path) == 0 else { appendUndo(r, "undo-failed", "rename errno \(errno)"); return false }
+        crashPoint("unquarantine-moved")
+        chmod(path, mode_t(before.mode))
+        rmdir((dest as NSString).deletingLastPathComponent)
+        appendUndo(r, "undo-done", nil)
+        return true
+    }
+
+    /// Rename is atomic, so the file is at `from` or at `to`. An interrupted quarantine is rolled back (the file goes
+    /// back with its mode); an interrupted restore is finished.
+    private func recoverQuarantine(_ r: JournalRecord) {
+        guard let path = r.from, let dest = r.to, let before = r.before else { return }
+        var e = r
+        e.ts = DoctorFS.iso(); e.temp = nil
+        if r.phase == "intent" {
+            if DoctorFS.lstat(path) == nil, DoctorFS.lstat(dest) != nil { rename(dest, path) }
+            chmod(path, mode_t(before.mode))
+            rmdir((dest as NSString).deletingLastPathComponent)
+            e.phase = "failed"; e.reason = "interrupted; file put back"
+        } else {
+            if DoctorFS.lstat(path) != nil, DoctorFS.lstat(dest) == nil {
+                chmod(path, mode_t(before.mode))
+                rmdir((dest as NSString).deletingLastPathComponent)
+                e.phase = "undo-done"; e.reason = "interrupted; restore finished"
+            } else {
+                e.phase = "undo-failed"; e.reason = "interrupted; still in quarantine"
+            }
+        }
+        try? journal.append(e)
     }
 
     // MARK: Archive an opted-in folder
@@ -225,7 +300,8 @@ final class DoctorExecutor {
             case .compress: decompress(r) ? (o.done += 1) : (o.failed += 1)
             case .moveToTrash: restoreFromTrash(r) ? (o.done += 1) : (o.failed += 1)
             case .archiveFolder: unarchive(r) ? (o.done += 1) : (o.failed += 1)
-            case .report, .evictCloud, .quarantine, .emptyTrash, .disableStartupItem,
+            case .quarantine: unquarantine(r) ? (o.done += 1) : (o.failed += 1)
+            case .report, .evictCloud, .emptyTrash, .disableStartupItem,
                  .disableBrowserExtension, .quitProcess, .uninstallApp, .moveFile: o.skipped += 1
             }
         }
@@ -280,6 +356,7 @@ final class DoctorExecutor {
             let key = "\(r.id)|\(r.phase == "undo-intent" ? "u" : "")"
             guard !ended.contains(key), let temp = r.temp else { continue }
             if r.action == .archiveFolder { recoverArchive(r, records); n += 1; continue }
+            if r.action == .quarantine { recoverQuarantine(r); n += 1; continue }
             if let orig = r.from, FileManager.default.fileExists(atPath: orig) {
                 unlink(temp)
             } else if let orig = r.from, FileManager.default.fileExists(atPath: temp) {

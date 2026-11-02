@@ -38,6 +38,7 @@ struct DoctorScanner {
                     let t = DoctorFS.treeStats(r)
                     return t.count > 0 ? (r, t.size, "\(t.count) items", nil) : nil }
             case "launchAgents": found = roots.flatMap(launchAgents)
+            case "clamav": found = clamav(roots)
             case "busyProcesses":
                 out += busyProcesses().map {
                     Finding(id: Finding.itemId(c.id, "pid:\($0.pid):\($0.name)"), category: c.id, action: c.action,
@@ -49,6 +50,11 @@ struct DoctorScanner {
             for (path, bytes, reason, flag) in found {
                 if c.action != .report, let why = guardian.refusal(path) {
                     skipped.append("\(c.id): \(rel(path)): \(why)")
+                    // A malware hit is still reported, just not acted on.
+                    if c.action == .quarantine {
+                        out.append(Finding(id: Finding.itemId(c.id, path), category: c.id, action: .report, tier: .observe,
+                                           path: path, bytes: bytes, reason: reason + "; not quarantined: " + why, flag: flag))
+                    }
                     continue
                 }
                 out.append(Finding(id: Finding.itemId(c.id, path), category: c.id, action: c.action, tier: catalogue.tier(of: c),
@@ -180,6 +186,33 @@ struct DoctorScanner {
             guard let sig else { return (p, 0, "\(label) runs an unsigned program", "unsigned") }
             if sig == "adhoc" { return (p, 0, "\(label) runs an ad-hoc-signed program", "adhoc") }
             return nil
+        }
+    }
+
+    // MARK: Malware: an optional, user-installed ClamAV (never bundled)
+
+    /// The user's own clamscan. With --root, LD_CLAMSCAN=<path>|off overrides it (test hook).
+    private func clamscanPath() -> String? {
+        if testRoot, let o = ProcessInfo.processInfo.environment["LD_CLAMSCAN"] { return o == "off" ? nil : o }
+        return ["/opt/homebrew/bin/clamscan", "/usr/local/bin/clamscan", "/opt/local/bin/clamscan"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    private mutating func clamav(_ roots: [String]) -> [(String, Int64, String, String?)] {
+        let dirs = roots.filter(DoctorFS.isDir)
+        guard !dirs.isEmpty else { return [] }
+        guard let tool = clamscanPath() else { skipped.append("malware: ClamAV is not installed, so no file scan (XProtect still protects)"); return [] }
+        let r = Self.run(tool, ["-r", "--infected", "--no-summary", "--stdout"] + dirs)
+        // 0 = clean, 1 = found, anything else = error (e.g. no signature database).
+        guard r.status == 0 || r.status == 1 else {
+            skipped.append("malware: clamscan failed (exit \(r.status)): \(r.text.prefix(200))"); return []
+        }
+        return r.text.split(separator: "\n").compactMap { line in
+            guard line.hasSuffix(" FOUND"), let sep = line.range(of: ": ", options: .backwards) else { return nil }
+            let path = String(line[..<sep.lowerBound])
+            let sig = line[sep.upperBound...].dropLast(6)
+            guard let st = DoctorFS.lstat(path), st.st_mode & S_IFMT == S_IFREG else { return nil }
+            return (path, Int64(st.st_size), "ClamAV: \(sig)", "malware")
         }
     }
 

@@ -13,6 +13,24 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: swift build
+      # The checkup uses a user-installed ClamAV if present; CI installs one so the EICAR fixture is really scanned.
+      - name: Install ClamAV
+        continue-on-error: true
+        run: |
+          brew install clamav
+          etc="$(brew --prefix)/etc/clamav"
+          sed -e 's/^Example/#Example/' "$etc/freshclam.conf.sample" > "$etc/freshclam.conf"
+          mkdir -p "$(brew --prefix)/var/lib/clamav"
+      - name: Cache ClamAV signatures
+        uses: actions/cache@v4
+        with:
+          path: /opt/homebrew/var/lib/clamav
+          key: clamav-db-${{ github.run_id }}
+          restore-keys: clamav-db-
+      - name: Update ClamAV signatures
+        continue-on-error: true
+        timeout-minutes: 8
+        run: freshclam --stdout && ls -la "$(brew --prefix)/var/lib/clamav"
       - name: Safety suite
         env: { CI: "true" }
         run: python3 tests/safety/run_safety.py --bin .build/debug/AIStack --work "$RUNNER_TEMP/doctor" --out doctor-results.json

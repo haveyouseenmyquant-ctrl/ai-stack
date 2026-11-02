@@ -28,12 +28,23 @@ class Ctx:
         self.journals.append(journal)
         return os.path.join(out, "home"), exp, journal, out
 
-    def doctor(self, verb, *args, check=True):
+    def doctor(self, verb, *args, check=True, env=None):
         cmd = [self.bin, "--doctor", verb, "--catalogue", CATALOGUE, *args]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=merged(env))
         if check and r.returncode != 0:
             raise AssertionError(f"{verb} failed rc={r.returncode}: {r.stderr.strip()[:400]}")
         return r
+
+
+def merged(env):
+    """os.environ plus `env`; a None value removes the variable."""
+    e = dict(os.environ)
+    for k, v in (env or {}).items():
+        if v is None:
+            e.pop(k, None)
+        else:
+            e[k] = v
+    return e
 
 
 def sha(p):
@@ -176,6 +187,63 @@ def t_crash_points_archive(c, res):
         assert not os.path.exists(zipf), f"{point}: zip left behind"
 
 
+FAKE_CLAMSCAN = """#!/usr/bin/env python3
+import os, sys
+hits = [os.path.join(r, f) for a in sys.argv[1:] if os.path.isdir(a) for r, _, fs in os.walk(a) for f in fs if "flagged" in f]
+for h in hits:
+    print(h + ": Fixture.Test.Signature FOUND")
+sys.exit(1 if hits else 0)
+"""
+QUARANTINE = "Library/Application Support/AIStack/Doctor/Quarantine"
+
+
+def t_quarantine_roundtrip_and_crash_points(c, res):
+    """A scanner hit is moved to quarantine with execute bits off; undo and every power cut put it back intact.
+    A stand-in clamscan (flags files named *flagged*) keeps this test independent of ClamAV's signature download."""
+    home, exp, j, out = c.fixture()
+    fake = os.path.join(out, "fake-clamscan")
+    with open(fake, "w") as f:
+        f.write(FAKE_CLAMSCAN)
+    os.chmod(fake, 0o755)
+    env = {"LD_CLAMSCAN": fake}
+    target = os.path.join(home, "Downloads", "invoice-flagged.bin")
+    with open(target, "wb") as f:
+        f.write(b"not really malware\n" * 100)
+    os.chmod(target, 0o755)
+    old = time.time() - 40 * 86400
+    os.utime(target, (old, old))
+    before = snapshot(home)
+    def where():
+        q = glob.glob(os.path.join(home, QUARANTINE, "*", "invoice-flagged.bin"))
+        return os.path.exists(target), q
+    def intact(point):
+        at_orig, q = where()
+        assert at_orig != bool(q), f"{point}: want the file at exactly one place, got orig={at_orig} quarantine={q}"
+        p = target if at_orig else q[0]
+        assert sha(p) == before["Downloads/invoice-flagged.bin"][0], f"{point}: bytes changed"
+    c.doctor("tier1", "--root", home, "--journal", j, env=env)
+    at_orig, q = where()
+    assert not at_orig and len(q) == 1, f"not quarantined: orig={at_orig} q={q}"
+    assert os.stat(q[0]).st_mode & 0o111 == 0, "execute bits left on"
+    intact("quarantined")
+    c.doctor("undo", "--root", home, "--journal", j)
+    assert not diff(before, snapshot(home), "all"), "undo did not restore the file"
+    assert os.stat(target).st_mode & 0o777 == 0o755, "mode not restored"
+    for verb, point in [("tier1", "quarantine-intent"), ("tier1", "quarantine-moved"), ("undo", "unquarantine-moved")]:
+        if verb == "undo":
+            c.doctor("tier1", "--root", home, "--journal", j, env=env)
+        r = subprocess.run([c.bin, "--doctor", verb, "--catalogue", CATALOGUE, "--root", home, "--journal", j],
+                           env=dict(os.environ, LD_CRASH_AT=point, **env), capture_output=True)
+        assert r.returncode != 0, f"{point}: crash point was not reached"
+        intact(point)
+        c.doctor("recover", "--root", home, "--journal", j)
+        intact(point + "+recover")
+        c.doctor("undo", "--root", home, "--journal", j)
+        assert not diff(before, snapshot(home), "all"), f"{point}: recover + undo did not restore the tree"
+        assert os.stat(target).st_mode & 0o777 == 0o755, f"{point}: mode not restored"
+        assert not glob.glob(os.path.join(home, QUARANTINE, "*", "*")), f"{point}: quarantine not empty"
+
+
 def t_archive_refuses_changed_or_odd_folders(c, res):
     """A symlink inside the folder, or an existing <folder>.zip, means no archiving at all."""
     home, exp, j, out = c.fixture()
@@ -309,7 +377,8 @@ def planted(c, res):
     try:
         time.sleep(3)
         report = os.path.join(out, "report.json")
-        c.doctor("scan", "--root", home, "--archive", ARCHIVE, "--out", report)
+        # The real, user-installed ClamAV if there is one (CI installs it); the other tests switch it off for speed.
+        c.doctor("scan", "--root", home, "--archive", ARCHIVE, "--out", report, env={"LD_CLAMSCAN": None})
     finally:
         for pr in procs:
             pr.kill()
@@ -327,6 +396,7 @@ def planted(c, res):
 
 
 SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_archive_refuses_changed_or_odd_folders,
+          t_quarantine_roundtrip_and_crash_points,
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
           t_writes_need_root]
@@ -341,6 +411,8 @@ def main():
     if os.path.exists(a.work):
         shutil.rmtree(a.work)
     os.makedirs(a.work)
+    # ClamAV loads its whole signature database on every scan (~30 s); only the planted-issue scan uses the real one.
+    os.environ["LD_CLAMSCAN"] = "off"
     c, res, tests = Ctx(a.bin, a.work), {}, {}
     for t in SAFETY:
         try:
