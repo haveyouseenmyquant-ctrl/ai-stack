@@ -41,7 +41,7 @@ jobs:
           freshclam --stdout || true
           if ! works; then
             echo "restored DB does not detect EICAR; downloading it again"
-            rm -rf "$db"/*; freshclam --stdout || true
+            rm -f "$db"/daily.*; freshclam --stdout || true
           fi
           if ! works; then
             # The published daily.cvd itself can fail its signature test (daily 28171 on 2026-11-02); then scan
