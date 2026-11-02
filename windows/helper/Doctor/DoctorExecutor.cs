@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -34,7 +35,8 @@ public class DoctorExecutor
             switch (f.Action)
             {
                 case DoctorAction.Compress: Tally(o, Compress(f)); break;
-                case DoctorAction.ArchiveFolder: case DoctorAction.EvictCloud: case DoctorAction.Quarantine:
+                case DoctorAction.ArchiveFolder: Tally(o, ArchiveFolder(f)); break;
+                case DoctorAction.EvictCloud: case DoctorAction.Quarantine:
                     // Not implemented on Windows yet: journalled as skipped so nothing happens silently.
                     Log(f, "skipped", "not implemented yet"); o.Skipped++; break;
                 case DoctorAction.Report: case DoctorAction.MoveToTrash: case DoctorAction.EmptyTrash: case DoctorAction.DisableStartupItem:
@@ -126,6 +128,210 @@ public class DoctorExecutor
         }
     }
 
+    // ---- Archive an opted-in folder
+
+    /// zip into a temp sibling → extract it again and compare every file's SHA-256 and the entry list →
+    /// rename to `<folder>.zip` → rename the folder aside → remove it. Until the zip is verified and in place the
+    /// folder is untouched; after that every byte is in the zip, and the manifest in the journal restores times and attributes.
+    (string, long) ArchiveFolder(Finding f)
+    {
+        var path = Path.GetFullPath(f.Path).TrimEnd(Path.DirectorySeparatorChar);
+        if (guardian.Refusal(path) is string why) { Log(f, "refused", why); return ("refused", 0); }
+        if (!DoctorFS.IsDir(path)) { Log(f, "skipped", "not a folder"); return ("skipped", 0); }
+        var zip = path + ".zip";
+        if (DoctorFS.Exists(zip)) { Log(f, "skipped", Path.GetFileName(zip) + " already exists"); return ("skipped", 0); }
+        if (Manifest(path) is not { } manifest) { Log(f, "skipped", "contains links or unreadable files"); return ("skipped", 0); }
+        if (manifest.FirstOrDefault(e => !e.Dir && IsOpen(Join(path, e.Rel))) is { } open)
+        { Log(f, "skipped", open.Rel + " is open in another process"); return ("skipped", 0); }
+        var id = DoctorJournal.NewId();
+        var tag = ArchiveTag(path, id);
+        string temp = tag + ".zip", check = tag + "-v", aside = tag + "-d";
+        var rec = new JournalRecord { Id = id, Checkup = checkup, Phase = "intent", Action = DoctorAction.ArchiveFolder, Tier = 1, PlanItem = f.Id,
+                                      From = path, To = zip, Temp = temp, Before = manifest[0].State, Reason = f.Reason, Manifest = manifest };
+        journal.Append(rec);
+        (string, long) Fail(string reason)
+        {
+            try { File.Delete(temp); } catch { }
+            RemoveTree(check);
+            var e = rec.Copy(); e.Phase = "failed"; e.Reason = reason; e.Ts = DoctorFS.Iso(); e.Manifest = null;
+            journal.Append(e);
+            return ("failed", 0);
+        }
+        try { WriteZip(path, manifest, temp); } catch (Exception e) { return Fail("zip: " + e.Message); }
+        CrashPoint("archive-zipped");
+        try { ZipFile.ExtractToDirectory(temp, check); } catch (Exception e) { return Fail("extract: " + e.Message); }
+        if (Manifest(check) is not { } back || !SameContents(manifest, back)) return Fail("verify: extracted zip differs");
+        RemoveTree(check);
+        if (State(temp) is not { } zstate) return Fail("zip vanished");
+        // The folder must not have changed while we zipped it.
+        if (Manifest(path, hash: false) is not { } again || !SameShape(manifest, again)) return Fail("changed during archiving");
+        var progress = rec.Copy(); progress.Phase = "verified"; progress.After = zstate; progress.Manifest = null; progress.Ts = DoctorFS.Iso();
+        journal.Append(progress);
+        CrashPoint("archive-verified");
+        try { File.Move(temp, zip, overwrite: false); } catch (Exception e) { return Fail("rename zip: " + e.Message); }
+        CrashPoint("archive-zip-in-place");
+        try { Directory.Move(path, aside); }
+        catch (Exception e) { try { File.Delete(zip); } catch { } return Fail("rename folder: " + e.Message); }
+        CrashPoint("archive-aside");
+        RemoveTree(aside);
+        CrashPoint("archive-removed");
+        var freed = Math.Max(0, manifest.Sum(e => e.State.Blocks) - zstate.Blocks) * 512;
+        var done = rec.Copy(); done.Phase = "done"; done.After = zstate; done.Temp = null; done.FreedBytes = freed; done.Ts = DoctorFS.Iso();
+        journal.Append(done);
+        return ("done", freed);
+    }
+
+    /// Extract next to the zip, verify against the manifest, restore times and attributes, rename into place, remove the zip.
+    bool Unarchive(JournalRecord r)
+    {
+        if (r.From is not string path || r.To is not string zip || r.Manifest is not { } manifest) return false;
+        if (DoctorFS.Exists(path) || !File.Exists(zip)) { AppendUndo(r, "undo-failed", "folder exists or zip missing"); return false; }
+        if (guardian.Refusal(zip, forWrite: false) is string why) { AppendUndo(r, "undo-failed", why); return false; }
+        var out_ = ArchiveTag(path, r.Id) + "-u";
+        RemoveTree(out_);
+        AppendUndo(r, "undo-intent", null, out_);
+        bool Fail(string reason) { RemoveTree(out_); AppendUndo(r, "undo-failed", reason); return false; }
+        try { Directory.CreateDirectory(out_); ZipFile.ExtractToDirectory(zip, out_); } catch (Exception e) { return Fail("extract: " + e.Message); }
+        CrashPoint("unarchive-extracted");
+        if (Manifest(out_) is not { } back || !SameContents(manifest, back)) return Fail("verify: zip no longer matches");
+        try
+        {
+            // Deepest first so restoring a folder's times isn't undone by touching its children; attributes last (read-only).
+            foreach (var e in manifest.OrderByDescending(e => e.Rel.Length))
+            {
+                var p = Join(out_, e.Rel);
+                if (e.Dir) { Directory.SetCreationTimeUtc(p, DoctorFS.FromUnix(e.State.Birth)); Directory.SetLastWriteTimeUtc(p, DoctorFS.FromUnix(e.State.Mtime)); }
+                else SetTimes(p, e.State.Mtime, e.State.Birth);
+                File.SetAttributes(p, (FileAttributes)e.State.Mode & ~FileAttributes.Compressed);
+            }
+            Directory.Move(out_, path);
+        }
+        catch (Exception e) { return Fail("restore: " + e.Message); }
+        CrashPoint("unarchive-in-place");
+        try { File.Delete(zip); } catch { }
+        AppendUndo(r, "undo-done", null);
+        return true;
+    }
+
+    /// An interrupted archive or un-archive. Every state on the way keeps the folder or a verified zip (or both).
+    void RecoverArchive(JournalRecord r, List<JournalRecord> records)
+    {
+        if (r.From is not string path || r.To is not string zip || r.Temp is not string temp) return;
+        var tag = ArchiveTag(path, r.Id);
+        var e = r.Copy(); e.Ts = DoctorFS.Iso(); e.Temp = null;
+        if (r.Phase == "undo-intent")
+        {
+            // The folder is only renamed into place after it verified, so the restore is complete.
+            if (DoctorFS.Exists(path)) { try { File.Delete(zip); } catch { } e.Phase = "undo-done"; e.Reason = "interrupted after restore; finished"; }
+            else { RemoveTree(temp); e.Phase = "undo-failed"; e.Reason = "interrupted; recovered"; }
+            journal.Append(e); return;
+        }
+        try { File.Delete(temp); } catch { }
+        RemoveTree(tag + "-v");
+        var verified = records.LastOrDefault(x => x.Id == r.Id && x.Phase == "verified")?.After;
+        if (Directory.Exists(path))
+        {
+            // Folder intact: drop our zip if it got into place, and leave things as they were.
+            if (verified != null && File.Exists(zip) && DoctorFS.Sha256File(zip) == verified.Sha256) { try { File.Delete(zip); } catch { } }
+            e.Phase = "failed"; e.Reason = "interrupted; recovered"; e.Manifest = null;
+        }
+        else if (verified != null && File.Exists(zip))
+        {
+            // The verified zip is in place and the folder was moved aside: finish removing it.
+            RemoveTree(tag + "-d");
+            e.Phase = "done"; e.After = verified; e.Reason = "interrupted while removing the folder; finished";
+            e.FreedBytes = Math.Max(0, (r.Manifest ?? new()).Sum(m => m.State.Blocks) - verified.Blocks) * 512;
+        }
+        else
+        {
+            // Never expected: put the aside copy back rather than lose anything.
+            if (Directory.Exists(tag + "-d")) Directory.Move(tag + "-d", path);
+            e.Phase = "failed"; e.Reason = "interrupted; folder restored"; e.Manifest = null;
+        }
+        journal.Append(e);
+    }
+
+    static string ArchiveTag(string path, string id) =>
+        Path.Combine(Path.GetDirectoryName(path)!, "." + Path.GetFileName(path) + ".ld-" + id[..8]);
+
+    static string Join(string root, string rel) => rel.Length == 0 ? root : Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar));
+
+    /// One zip entry per manifest entry ("/" separators, folders as "name/"), written to a new file and flushed.
+    static void WriteZip(string root, List<ManifestEntry> manifest, string dest)
+    {
+        using var fs = new FileStream(dest, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+        using (var z = new ZipArchive(fs, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var e in manifest.Where(e => e.Rel.Length > 0))
+            {
+                var entry = z.CreateEntry(e.Dir ? e.Rel + "/" : e.Rel, CompressionLevel.Optimal);
+                entry.LastWriteTime = DoctorFS.FromUnix(e.State.Mtime).ToLocalTime();
+                if (e.Dir) continue;
+                using var o = entry.Open();
+                using var i = new FileStream(Join(root, e.Rel), FileMode.Open, FileAccess.Read, FileShare.Read);
+                i.CopyTo(o, 1 << 20);
+            }
+        }
+        fs.Flush(flushToDisk: true);
+    }
+
+    /// Every entry under `root` (root itself as ""), or null if it holds a link or an unreadable file.
+    /// Lists the folder directly (not DoctorFS.List, which hides desktop.ini and Thumbs.db) so nothing is left out of the zip.
+    public static List<ManifestEntry>? Manifest(string root, bool hash = true)
+    {
+        var out_ = new List<ManifestEntry>();
+        bool Walk(string p, string rel)
+        {
+            if (DoctorFS.IsLink(p)) return false;
+            if (File.Exists(p))
+            {
+                if (State(p, hash) is not { } s || (hash && s.Sha256 == null)) return false;
+                out_.Add(new ManifestEntry(rel, false, s)); return true;
+            }
+            if (!Directory.Exists(p)) return false;
+            string[] names;
+            try { names = Directory.GetFileSystemEntries(p); } catch { return false; }
+            var di = new DirectoryInfo(p);
+            out_.Add(new ManifestEntry(rel, true, new FileState(0, 0, DoctorFS.Unix(di.LastWriteTimeUtc), DoctorFS.Unix(di.CreationTimeUtc), (int)di.Attributes, null)));
+            foreach (var c in names.OrderBy(x => x, StringComparer.Ordinal))
+            {
+                var n = Path.GetFileName(c);
+                if (!Walk(c, rel.Length == 0 ? n : rel + "/" + n)) return false;
+            }
+            return true;
+        }
+        return Walk(root, "") ? out_ : null;
+    }
+
+    /// Same entry list, kinds and file bytes (times are restored from the manifest, so they are not compared).
+    static bool SameContents(List<ManifestEntry> a, List<ManifestEntry> b)
+    {
+        var bm = b.GroupBy(e => e.Rel).ToDictionary(g => g.Key, g => g.First());
+        return a.Count == b.Count && a.All(e => bm.TryGetValue(e.Rel, out var o) && o.Dir == e.Dir &&
+                                               (e.Dir || (o.State.Sha256 == e.State.Sha256 && o.State.Size == e.State.Size)));
+    }
+
+    /// Same entry list, sizes and file mtimes: a cheap "did anything change" check.
+    static bool SameShape(List<ManifestEntry> a, List<ManifestEntry> b)
+    {
+        var bm = b.GroupBy(e => e.Rel).ToDictionary(g => g.Key, g => g.First());
+        return a.Count == b.Count && a.All(e => bm.TryGetValue(e.Rel, out var o) && o.Dir == e.Dir &&
+                                               (e.Dir || (o.State.Size == e.State.Size && o.State.Mtime == e.State.Mtime)));
+    }
+
+    /// Deletes one of our own temp or aside trees; clears read-only first, which Directory.Delete refuses.
+    static void RemoveTree(string p)
+    {
+        if (!Directory.Exists(p)) return;
+        try
+        {
+            foreach (var f in Directory.EnumerateFileSystemEntries(p, "*", SearchOption.AllDirectories))
+                File.SetAttributes(f, FileAttributes.Normal);
+            Directory.Delete(p, recursive: true);
+        }
+        catch { }
+    }
+
     // ---- Undo
 
     public Outcome Undo(List<JournalRecord> records, string? entry)
@@ -138,7 +344,8 @@ public class DoctorExecutor
             {
                 case DoctorAction.Compress: if (Decompress(r)) o.Done++; else o.Failed++; break;
                 case DoctorAction.MoveToTrash: if (RestoreFromTrash(r)) o.Done++; else o.Failed++; break;
-                case DoctorAction.Report: case DoctorAction.EvictCloud: case DoctorAction.ArchiveFolder: case DoctorAction.Quarantine:
+                case DoctorAction.ArchiveFolder: if (Unarchive(r)) o.Done++; else o.Failed++; break;
+                case DoctorAction.Report: case DoctorAction.EvictCloud: case DoctorAction.Quarantine:
                 case DoctorAction.EmptyTrash: case DoctorAction.DisableStartupItem: case DoctorAction.DisableBrowserExtension:
                 case DoctorAction.QuitProcess: case DoctorAction.UninstallApp: case DoctorAction.MoveFile:
                     o.Skipped++; break;
@@ -205,6 +412,7 @@ public class DoctorExecutor
         foreach (var r in records.Where(r => r.Phase is "intent" or "undo-intent"))
         {
             if (ended.Contains(r.Id + "|" + (r.Phase == "undo-intent" ? "u" : "")) || r.Temp is not string temp) continue;
+            if (r.Action == DoctorAction.ArchiveFolder) { RecoverArchive(r, records); n++; continue; }
             if (r.From is string orig && File.Exists(orig)) { try { File.Delete(temp); } catch { } }
             else if (r.From is string o2 && File.Exists(temp)) File.Move(temp, o2);   // never expected, but never leave it missing
             var e = r.Copy(); e.Phase = r.Phase == "intent" ? "failed" : "undo-failed"; e.Reason = "interrupted; recovered"; e.Ts = DoctorFS.Iso();

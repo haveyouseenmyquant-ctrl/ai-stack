@@ -23,9 +23,13 @@ public class JournalRecord
     public string? By { get; set; }
     public string? Reason { get; set; }
     public long? FreedBytes { get; set; }
+    public List<ManifestEntry>? Manifest { get; set; }   // archiveFolder: every entry of the folder, to verify and restore
 
     public JournalRecord Copy() => (JournalRecord)MemberwiseClone();
 }
+
+/// One entry of an archived folder; Rel "" is the folder itself, separators are "/".
+public record ManifestEntry(string Rel, bool Dir, FileState State);
 
 /// `blocks` is allocated bytes / 512 (as on macOS); `mode` holds the Windows file attributes.
 public record FileState(long Size, long Blocks, double Mtime, double Birth, int Mode, string? Sha256);
