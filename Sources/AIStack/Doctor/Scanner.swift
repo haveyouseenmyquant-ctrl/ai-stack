@@ -204,7 +204,8 @@ struct DoctorScanner {
     /// The user's own clamscan. With --root, LD_CLAMSCAN=<path>|off overrides it (test hook).
     private func clamscanPath() -> String? {
         if testRoot, let o = ProcessInfo.processInfo.environment["LD_CLAMSCAN"] { return o == "off" ? nil : o }
-        return ["/opt/homebrew/bin/clamscan", "/usr/local/bin/clamscan", "/opt/local/bin/clamscan"]
+        // Homebrew, the official Cisco-Talos pkg (/usr/local/clamav), MacPorts.
+        return ["/opt/homebrew/bin/clamscan", "/usr/local/clamav/bin/clamscan", "/usr/local/bin/clamscan", "/opt/local/bin/clamscan"]
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 

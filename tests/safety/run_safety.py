@@ -519,8 +519,8 @@ def planted(c, res):
     try:
         time.sleep(3)
         report = os.path.join(out, "report.json")
-        # The real, user-installed ClamAV if there is one (CI installs it); the other tests switch it off for speed.
-        c.doctor("scan", "--root", home, "--archive", ARCHIVE, "--out", report, env={"LD_CLAMSCAN": None})
+        # The real ClamAV: the user-installed one, or CI's copy (LD_REAL_CLAMSCAN); the other tests switch it off for speed.
+        c.doctor("scan", "--root", home, "--archive", ARCHIVE, "--out", report, env={"LD_CLAMSCAN": os.environ.get("LD_REAL_CLAMSCAN")})
     finally:
         for pr in procs:
             pr.kill()

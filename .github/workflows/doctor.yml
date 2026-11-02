@@ -13,77 +13,47 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: swift build
-      # The checkup uses a user-installed ClamAV if present; CI installs one so the EICAR fixture is really scanned.
+      # The checkup uses a user-installed ClamAV if present; CI provides one so the EICAR fixture is really scanned.
+      # Homebrew's clamav 1.5.4_1 bottle links OpenSSL 4, with which libclamav can't hash anything (every CVD fails its
+      # signature check, every scan "error calculating sha2-256 hash"). CI therefore uses Cisco-Talos's official macOS
+      # pkg, expanded (not installed) into the runner's temp folder; a wrapper points it at its bundled libraries and
+      # signature folder, and the suite passes the wrapper to the planted-issue scan (LD_REAL_CLAMSCAN).
       - name: Install ClamAV
         continue-on-error: true
+        env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          brew install clamav
-          etc="$(brew --prefix)/etc/clamav"
-          sed -e 's/^Example/#Example/' "$etc/freshclam.conf.sample" > "$etc/freshclam.conf"
-          mkdir -p "$(brew --prefix)/var/lib/clamav"
-          # ClamAV 1.5 verifies the .cvd.sign files with the certs it ships; freshclam's "NULL X509 store" means it
-          # can't find them, so point CVD_CERTS_DIR (read by freshclam and clamscan) at the bottle's copy.
-          clamscan --version
-          certs="$(find "$(brew --prefix clamav)/" "$(brew --prefix)/etc/clamav" -name '*.crt' 2>/dev/null | head -1)"
-          echo "ClamAV certs: ${certs:-none found}"
-          [ -n "$certs" ] && echo "CVD_CERTS_DIR=$(dirname "$certs")" >> "$GITHUB_ENV"
+          gh release download clamav-1.5.4 -R Cisco-Talos/clamav -p 'clamav-1.5.4.macos.universal.pkg' -D "$RUNNER_TEMP"
+          pkgutil --expand-full "$RUNNER_TEMP/clamav-1.5.4.macos.universal.pkg" "$RUNNER_TEMP/clampkg"
+          c="$RUNNER_TEMP/clamav"; mkdir -p "$c/bin" "$c/db"
+          for part in programs libraries; do cp -R "$RUNNER_TEMP/clampkg/clamav-1.5.4.macos.universal-$part.pkg/Payload/usr/local/clamav/." "$c/"; done
+          printf 'DatabaseDirectory %s\nDatabaseMirror database.clamav.net\n' "$c/db" > "$c/freshclam.conf"
+          for tool in clamscan freshclam; do
+            extra=$([ "$tool" = clamscan ] && echo "--database=$c/db" || echo "--config-file=$c/freshclam.conf")
+            printf '#!/bin/sh\nCVD_CERTS_DIR="%s/etc/certs" DYLD_LIBRARY_PATH="%s/lib" exec "%s/bin/%s" %s "$@"\n' "$c" "$c" "$c" "$tool" "$extra" > "$c/$tool"
+            chmod +x "$c/$tool"
+          done
+          "$c/clamscan" --version
+          echo "CLAM=$c" >> "$GITHUB_ENV"
+          echo "LD_REAL_CLAMSCAN=$c/clamscan" >> "$GITHUB_ENV"
       - name: Restore ClamAV signatures
         uses: actions/cache/restore@v4
         with:
-          path: /opt/homebrew/var/lib/clamav
-          key: clamav-db-${{ github.run_id }}
-          restore-keys: clamav-db-
-      # Homebrew's ClamAV 1.5.4 bottle rejects the signature of every published CVD ("cli_loadinfo: Incorrect digital
-      # signature" for main.cvd too; freshclam: "NULL X509 store"), so no packed database loads. The CVDs are a 512-byte
-      # header plus a tarball of plain signature files, and clamscan loads plain files without the signature check:
-      # freshclam downloads them (TestDatabases off, so it keeps them), then they are unpacked in place. Same
-      # signatures, nothing hand-written. The DB must detect EICAR before it is used or cached.
+          path: ${{ runner.temp }}/clamav/db
+          key: clamav-pkg-db-${{ github.run_id }}
+          restore-keys: clamav-pkg-db-
+      # The DB must detect EICAR before it is used or cached; otherwise it is downloaded again from scratch.
       - name: Update ClamAV signatures
         id: clamdb
         continue-on-error: true
         timeout-minutes: 10
         run: |
-          db="$(brew --prefix)/var/lib/clamav"
-          echo "TestDatabases no" >> "$(brew --prefix)/etc/clamav/freshclam.conf"
           probe="$RUNNER_TEMP/clamprobe"; mkdir -p "$probe"
           printf '%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > "$probe/eicar.com"
-          works() { local r=0; clamscan --no-summary "$probe/eicar.com" || r=$?; [ "$r" -eq 1 ]; }
+          works() { local r=0; "$CLAM/clamscan" --no-summary "$probe/eicar.com" || r=$?; [ "$r" -eq 1 ]; }
+          "$CLAM/freshclam" --stdout || true
           if ! works; then
-            rm -rf "${db:?}"/*
-            freshclam --stdout || true
-            ls -l "$db"
-            python3 -I - "$db" <<'PY'
-          import glob, io, os, sys, tarfile
-          db = sys.argv[1]
-          for p in glob.glob(os.path.join(db, "*.cvd")) + glob.glob(os.path.join(db, "*.cld")):
-              name = os.path.basename(p)
-              if name.startswith("bytecode."):  # unsigned bytecode needs --bytecode-unsigned; EICAR doesn't need it
-                  os.remove(p); continue
-              with open(p, "rb") as f:
-                  f.seek(512)
-                  with tarfile.open(fileobj=io.BytesIO(f.read()), mode="r:*") as t:
-                      for m in t.getmembers():
-                          if m.isfile() and not m.name.endswith(".info") and "/" not in m.name:
-                              t.extract(m, db, filter="data")
-              os.remove(p)
-              print("unpacked", name)
-          PY
-            ls -l "$db"
-          fi
-          if ! works; then
-            # "fmap_get_hash: error calculating sha2-256 hash" = the bottle's OpenSSL can't hash at all. Try likely
-            # environment causes and keep the first that works (exported for the suite's clamscan).
-            env | grep -i -E 'ssl|crypto' || true
-            otool -L "$(brew --prefix clamav)/lib/libclamav.dylib" | grep -i -E 'ssl|crypto' || true
-            ossl="$(brew --prefix openssl@3)"
-            for try in "OPENSSL_CONF=/dev/null" "OPENSSL_MODULES=$ossl/lib/ossl-modules" "OPENSSL_CONF=$ossl/etc/openssl@3/openssl.cnf" \
-                       "OPENSSL_CONF=/dev/null OPENSSL_MODULES=$ossl/lib/ossl-modules"; do
-              echo "trying: $try"
-              if env $try clamscan --no-summary "$probe/eicar.com"; [ $? -eq 1 ]; then
-                for kv in $try; do echo "$kv" >> "$GITHUB_ENV"; export "$kv"; done
-                break
-              fi
-            done
+            echo "DB does not detect EICAR; downloading it again"
+            rm -f "$CLAM"/db/*.c[lv]d; "$CLAM/freshclam" --stdout || true
           fi
           works
           echo "verified=true" >> "$GITHUB_OUTPUT"
@@ -91,8 +61,8 @@ jobs:
         if: steps.clamdb.outputs.verified == 'true'
         uses: actions/cache/save@v4
         with:
-          path: /opt/homebrew/var/lib/clamav
-          key: clamav-db-${{ github.run_id }}
+          path: ${{ runner.temp }}/clamav/db
+          key: clamav-pkg-db-${{ github.run_id }}
       - name: Safety suite
         env: { CI: "true" }
         run: python3 tests/safety/run_safety.py --bin .build/debug/AIStack --work "$RUNNER_TEMP/doctor" --out doctor-results.json
