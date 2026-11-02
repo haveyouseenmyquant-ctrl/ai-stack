@@ -495,12 +495,19 @@ def t_summary_sends_no_user_names(c, res):
     assert facts["startupItems"] and facts["processes"] and facts["findings"], f"summary facts are empty: {facts}"
     allowed = {"Library", "Caches", "LaunchAgents", "Documents", "Downloads", "Desktop", "Projects", "Code",
                "AppData", "Local", "Roaming", ".Trash"}
+    named = set()
     for f in load(report)["findings"]:   # what the summary may name: process/job names and their programs
-        allowed |= {f.get("processName") or "", os.path.basename(f.get("executable") or "")}
+        named |= {f.get("processName") or "", os.path.basename(f.get("executable") or "")}
+    allowed |= named
     names = set()
     for r, ds, fs in os.walk(home):
         names |= {n for n in ds + fs if len(n) >= 4}
-    leaked = sorted(n for n in names - allowed if n in prompt)
+    # A startup item's own name may contain a folder's (Run value "FixtureFishyUpdater", folder "FishyUpdater"):
+    # take the permitted names out first, then any user name still present is a leak.
+    rest = prompt
+    for a in sorted(filter(None, named), key=len, reverse=True):
+        rest = rest.replace(a, " ")
+    leaked = sorted(n for n in names - allowed if n in rest)
     assert not leaked, f"summary prompt contains user file/folder names: {leaked[:5]}"
     assert os.path.basename(home) not in prompt and home not in prompt and json.dumps(home)[1:-1] not in prompt, \
         "summary prompt contains the home path"
