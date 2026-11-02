@@ -40,6 +40,7 @@ public class DoctorScanner
             switch (c.Match.Kind)
             {
                 case "coldCompressible": found = ColdCompressible(); break;
+                case "cloudFiles": found = CloudFiles(); break;
                 case "optedInFolders":
                     found = optedIn.Where(DoctorFS.IsDir).Select(f => new Hit(f, DoctorFS.TreeStats(f).Size, "you marked this folder for archiving")).ToList();
                     break;
@@ -123,12 +124,43 @@ public class DoctorScanner
                 try { fi = new FileInfo(p); } catch { continue; }
                 if (!fi.Exists || fi.Length < minBytes || fi.Attributes.HasFlag(FileAttributes.Compressed)
                     || fi.Attributes.HasFlag(FileAttributes.System) || fi.Attributes.HasFlag(FileAttributes.Offline)
+                    || fi.Attributes.HasFlag(FileAttributes.ReparsePoint)   // cloud placeholders: eviction frees them
                     || noExt.Contains(fi.Extension) || CodeExtensions.Contains(fi.Extension)) continue;
                 // Last access is only kept coarsely by NTFS (and our own hashing touches it); modified time decides.
                 if (AgeDays(fi.LastWriteTimeUtc) < cold) continue;
                 var gain = SampleGain(p);
                 if (gain < gainNeeded) continue;
                 out_.Add(new Hit(p, fi.Length, $"cold {AgeDays(fi.LastWriteTimeUtc):F0} days, sample shrinks {gain * 100:F0}%"));
+            }
+        }
+        Walk(home);
+        return out_;
+    }
+
+    // ---- Tier 1: local copies of cloud files
+
+    /// In-sync, fully local, unpinned placeholders under any sync root in the home folder, untouched for cloudColdDays.
+    List<Hit> CloudFiles()
+    {
+        var out_ = new List<Hit>();
+        if (!OperatingSystem.IsWindows()) return out_;
+        double cold = catalogue.Value("cloudColdDays");
+        void Walk(string dir)
+        {
+            foreach (var p in DoctorFS.List(dir))
+            {
+                if (DoctorFS.IsLink(p)) continue;
+                if (Directory.Exists(p))
+                {
+                    if (p.Equals(Path.Combine(home, "AppData"), DoctorFS.PathCmp)) continue;
+                    Walk(p);
+                    continue;
+                }
+                try { if (!File.GetAttributes(p).HasFlag(FileAttributes.ReparsePoint)) continue; } catch { continue; }
+                if (DoctorCloud.PlaceholderState(p) is not { InSync: true, Pinned: false, Dehydrated: false }) continue;
+                var fi = new FileInfo(p);
+                if (AgeDays(fi.LastWriteTimeUtc) < cold) continue;
+                out_.Add(new Hit(p, DoctorFS.Allocated(p), $"synced to the cloud, untouched {AgeDays(fi.LastWriteTimeUtc):F0} days"));
             }
         }
         Walk(home);

@@ -36,7 +36,8 @@ public class DoctorExecutor
             {
                 case DoctorAction.Compress: Tally(o, Compress(f)); break;
                 case DoctorAction.ArchiveFolder: Tally(o, ArchiveFolder(f)); break;
-                case DoctorAction.EvictCloud: case DoctorAction.Quarantine:
+                case DoctorAction.EvictCloud: Tally(o, EvictCloud(f)); break;
+                case DoctorAction.Quarantine:
                     // Not implemented on Windows yet: journalled as skipped so nothing happens silently.
                     Log(f, "skipped", "not implemented yet"); o.Skipped++; break;
                 case DoctorAction.Report: case DoctorAction.MoveToTrash: case DoctorAction.EmptyTrash: case DoctorAction.DisableStartupItem:
@@ -115,6 +116,54 @@ public class DoctorExecutor
         var done = rec.Copy(); done.Phase = "done"; done.After = after; done.FreedBytes = freed; done.Ts = DoctorFS.Iso(); done.Temp = null;
         journal.Append(done);
         return ("done", freed);
+    }
+
+    /// Frees the local copy of an in-sync cloud placeholder. One call, and either state is lossless: the provider
+    /// holds the bytes, so a crash leaves the file local or evicted, never missing. Undo downloads it again.
+    (string, long) EvictCloud(Finding f)
+    {
+        var path = f.Path;
+        if (guardian.Refusal(path) is string why) { Log(f, "refused", why); return ("refused", 0); }
+        if (!OperatingSystem.IsWindows()) { Log(f, "skipped", "cloud eviction needs Windows"); return ("skipped", 0); }
+        if (DoctorCloud.PlaceholderState(path) is not { InSync: true, Pinned: false, Dehydrated: false })
+        { Log(f, "skipped", "not an in-sync, unpinned, local cloud file any more"); return ("skipped", 0); }
+        var before = State(path);
+        if (before == null) { Log(f, "skipped", "missing"); return ("skipped", 0); }
+        if (f.Fingerprint is { } fp && (fp.Size != before.Size || Math.Abs(fp.Mtime - before.Mtime) > 0.001))
+        { Log(f, "skipped", "changed since scan"); return ("skipped", 0); }
+        if (IsOpen(path)) { Log(f, "skipped", "open in another process"); return ("skipped", 0); }
+        var rec = new JournalRecord { Id = DoctorJournal.NewId(), Checkup = checkup, Phase = "intent", Action = DoctorAction.EvictCloud, Tier = 1,
+                                      PlanItem = f.Id, From = path, To = path, Before = before, Reason = f.Reason };
+        journal.Append(rec);
+        CrashPoint("evict-intent");
+        try { DoctorCloud.Dehydrate(path); }
+        catch (Exception e)
+        {
+            var fl = rec.Copy(); fl.Phase = "failed"; fl.Reason = e.Message; fl.Ts = DoctorFS.Iso();
+            journal.Append(fl);
+            return ("failed", 0);
+        }
+        var freed = Math.Max(0, before.Blocks * 512 - DoctorFS.Allocated(path));
+        var done = rec.Copy(); done.Phase = "done"; done.After = State(path, hash: false); done.FreedBytes = freed; done.Ts = DoctorFS.Iso();
+        journal.Append(done);
+        return ("done", freed);
+    }
+
+    /// Downloads an evicted file again and checks it is the same bytes and times as before.
+    bool Rehydrate(JournalRecord r)
+    {
+        if (r.From is not string path || r.Before is not FileState before) return false;
+        if (guardian.Refusal(path, forWrite: false) is string why) { AppendUndo(r, "undo-failed", why); return false; }
+        AppendUndo(r, "undo-intent", null);
+        try
+        {
+            DoctorCloud.Hydrate(path);
+            var s = State(path);
+            if (s == null || s.Sha256 != before.Sha256) throw new IOException("verify: bytes differ after download");
+        }
+        catch (Exception e) { AppendUndo(r, "undo-failed", e.Message); return false; }
+        AppendUndo(r, "undo-done", null);
+        return true;
     }
 
     /// Streams the bytes into a new file whose NTFS compression state is set before any data is written.
@@ -347,7 +396,8 @@ public class DoctorExecutor
                 case DoctorAction.Compress: if (Decompress(r)) o.Done++; else o.Failed++; break;
                 case DoctorAction.MoveToTrash: if (RestoreFromTrash(r)) o.Done++; else o.Failed++; break;
                 case DoctorAction.ArchiveFolder: if (Unarchive(r)) o.Done++; else o.Failed++; break;
-                case DoctorAction.Report: case DoctorAction.EvictCloud: case DoctorAction.Quarantine:
+                case DoctorAction.EvictCloud: if (Rehydrate(r)) o.Done++; else o.Failed++; break;
+                case DoctorAction.Report: case DoctorAction.Quarantine:
                 case DoctorAction.EmptyTrash: case DoctorAction.DisableStartupItem: case DoctorAction.DisableBrowserExtension:
                 case DoctorAction.QuitProcess: case DoctorAction.UninstallApp: case DoctorAction.MoveFile:
                     o.Skipped++; break;
@@ -413,7 +463,9 @@ public class DoctorExecutor
         int n = 0;
         foreach (var r in records.Where(r => r.Phase is "intent" or "undo-intent"))
         {
-            if (ended.Contains(r.Id + "|" + (r.Phase == "undo-intent" ? "u" : "")) || r.Temp is not string temp) continue;
+            if (ended.Contains(r.Id + "|" + (r.Phase == "undo-intent" ? "u" : ""))) continue;
+            if (r.Action == DoctorAction.EvictCloud) { RecoverEvict(r); n++; continue; }
+            if (r.Temp is not string temp) continue;
             if (r.Action == DoctorAction.ArchiveFolder) { RecoverArchive(r, records); n++; continue; }
             if (r.From is string orig && File.Exists(orig)) { try { File.Delete(temp); } catch { } }
             else if (r.From is string o2 && File.Exists(temp)) File.Move(temp, o2);   // never expected, but never leave it missing
@@ -422,6 +474,16 @@ public class DoctorExecutor
             n++;
         }
         return n;
+    }
+
+    /// Eviction is one call, so an interrupted one is either evicted (record it as done, so Undo can download it)
+    /// or still local (failed). An interrupted download just stays evicted; Undo can be run again.
+    void RecoverEvict(JournalRecord r)
+    {
+        var e = r.Copy(); e.Ts = DoctorFS.Iso(); e.Reason = "interrupted; recovered";
+        var evicted = r.From is string p && DoctorCloud.PlaceholderState(p) is { Dehydrated: true };
+        e.Phase = r.Phase == "intent" ? (evicted ? "done" : "failed") : (evicted ? "undo-failed" : "undo-done");
+        journal.Append(e);
     }
 
     // ---- Tier 2

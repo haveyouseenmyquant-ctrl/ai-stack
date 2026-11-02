@@ -19,16 +19,33 @@ TRASH = "RecycleBinFixture" if WINDOWS else ".Trash"   # test-mode Trash / Recyc
 
 class Ctx:
     def __init__(self, binary, work):
-        self.bin, self.work, self.n, self.journals = os.path.abspath(binary), os.path.abspath(work), 0, []
+        self.bin, self.work, self.n, self.journals, self.providers = os.path.abspath(binary), os.path.abspath(work), 0, [], []
 
     def fixture(self):
         self.n += 1
         out = os.path.join(self.work, f"fx{self.n}")
         subprocess.run([sys.executable, MAKE, out], check=True, stdout=subprocess.DEVNULL)
         exp = json.load(open(os.path.join(out, "expected.json")))
+        exp["syncRoot"] = self.cloud_provider(out)
+        if exp["syncRoot"]:
+            exp["tier1EligibleBytes"] = exp["tier1EligibleBytesWithSyncRoot"]
         journal = os.path.join(out, "journal.jsonl")
         self.journals.append(journal)
         return os.path.join(out, "home"), exp, journal, out
+
+    def cloud_provider(self, out):
+        """Windows: makes home/FixtureCloud a real Cloud Files sync root served by the test provider
+        (LD_CLOUD_PROVIDER). False if there is none or the machine can't host one; the cloud items then count as missed."""
+        exe, cloud = os.environ.get("LD_CLOUD_PROVIDER"), os.path.join(out, "home", "FixtureCloud")
+        if not (WINDOWS and exe and os.path.isdir(cloud)):
+            return False
+        pr = subprocess.Popen([exe, cloud, os.path.join(out, "cloud-server")], stdout=subprocess.PIPE, text=True)
+        line = pr.stdout.readline().strip()
+        if line != "ready":
+            print("cloud provider:", line or f"exited {pr.wait()}")
+            return False
+        self.providers.append(pr)
+        return True
 
     def doctor(self, verb, *args, check=True, env=None):
         cmd = [self.bin, "--doctor", verb, "--catalogue", CATALOGUE, *args]
@@ -280,6 +297,30 @@ def t_crash_points_compress(c, res):
         assert not compressed_files(home), f"{point}: still compressed after undo"
 
 
+def t_evict_cloud_roundtrip(c, res):
+    """Windows: in-sync cloud files lose their local bytes, a pinned one is kept, a crash right after the journal
+    intent is recovered, and undo downloads the same bytes and times. (Reading a file downloads it, so the
+    local-bytes checks come before any snapshot.)"""
+    home, exp, j, out = c.fixture()
+    assert exp["syncRoot"], "no sync root: the test cloud provider did not start"
+    cloud = [os.path.join(home, *x["path"].split("/")) for x in exp["planted"] if x["action"] == "evictCloud"]
+    pinned = cloud.pop()
+    subprocess.run(["attrib", "+P", pinned], check=True, capture_output=True)
+    before = snapshot(home)
+    r = subprocess.run([c.bin, "--doctor", "tier1", "--catalogue", CATALOGUE, "--root", home, "--journal", j],
+                       env=dict(os.environ, LD_CRASH_AT="evict-intent"), capture_output=True)
+    assert r.returncode != 0, "evict-intent: crash point was not reached"
+    c.doctor("recover", "--root", home, "--journal", j)
+    c.doctor("tier1", "--root", home, "--journal", j)
+    local = [p for p in cloud if allocated(p) > 0]
+    assert not local, f"still local after tier1: {local}"
+    assert allocated(pinned) > 0, "evicted a pinned file"
+    c.doctor("undo", "--root", home, "--journal", j)
+    local = [p for p in cloud if allocated(p) > 0]
+    assert len(local) == len(cloud), f"undo did not download {set(cloud) - set(local)}"
+    assert not diff(before, snapshot(home), "all"), f"undo did not restore the tree: {diff(before, snapshot(home), 'all')[:5]}"
+
+
 def t_archive_refuses_changed_or_odd_folders(c, res):
     """A symlink inside the folder, or an existing <folder>.zip, means no archiving at all."""
     home, exp, j, out = c.fixture()
@@ -443,7 +484,7 @@ SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_arch
           t_crash_points_compress if WINDOWS else t_quarantine_roundtrip_and_crash_points,
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
-          t_writes_need_root]
+          t_writes_need_root] + ([t_evict_cloud_roundtrip] if WINDOWS else [])
 
 
 def main():
@@ -470,6 +511,8 @@ def main():
         planted(c, res)
     except Exception:
         traceback.print_exc()
+    for pr in c.providers:
+        pr.kill()
     r = c.doctor("verify-journal", *[j for j in c.journals if os.path.exists(j)], check=False)
     res["unapprovedDestructive"] = json.loads(r.stdout)["unapprovedDestructive"]
     res["safety"] = {"passed": sum(v == "pass" for v in tests.values()), "total": len(tests), "tests": tests}

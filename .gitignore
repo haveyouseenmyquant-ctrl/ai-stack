@@ -9,3 +9,5 @@ dist/
 
 # Laptop Doctor fixtures
 /out/
+tests/windows/CloudTestProvider/bin/
+tests/windows/CloudTestProvider/obj/

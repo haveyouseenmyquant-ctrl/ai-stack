@@ -2,6 +2,7 @@
   "version": 1,
   "defaults": {
     "coldDays": 60,
+    "cloudColdDays": 60,
     "minCompressionGain": 0.25,
     "minCompressBytes": 262144,
     "neverModifiedWithinDays": 7,
@@ -15,6 +16,10 @@
     { "id": "cold-compressible", "action": "compress", "tier": 1,
       "label": "Compress {count} cold files in place (they still open normally)",
       "match": { "kind": "coldCompressible" },
+      "paths": { "macos": ["~"], "windows": ["%USERPROFILE%"] } },
+    { "id": "cloud-evictable", "action": "evictCloud", "tier": 1,
+      "label": "Free up local copies of {count} cloud files (they stay in your cloud and download again when opened)",
+      "match": { "kind": "cloudFiles" },
       "paths": { "macos": ["~"], "windows": ["%USERPROFILE%"] } },
     { "id": "opted-in-archive", "action": "archiveFolder", "tier": 1,
       "label": "Zip {count} folders you marked for archiving",

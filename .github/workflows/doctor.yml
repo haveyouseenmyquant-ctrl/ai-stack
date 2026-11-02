@@ -3,7 +3,7 @@ on:
   push:
     branches: [laptop-doctor]
   pull_request:
-    paths: ["Sources/AIStack/Doctor/**", "windows/helper/Doctor/**", "shared/**", "tests/safety/**", "fixtures/**", ".github/workflows/doctor.yml"]
+    paths: ["Sources/AIStack/Doctor/**", "windows/helper/Doctor/**", "shared/**", "tests/safety/**", "tests/windows/**", "fixtures/**", ".github/workflows/doctor.yml"]
   workflow_dispatch:
 jobs:
   macos:
@@ -51,9 +51,13 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build
-        run: dotnet build windows/helper -c Debug -nologo
+        run: |
+          dotnet build windows/helper -c Debug -nologo
+          dotnet build tests/windows/CloudTestProvider -c Debug -nologo
       - name: Safety suite
-        env: { CI: "true" }
+        env:
+          CI: "true"
+          LD_CLOUD_PROVIDER: ${{ github.workspace }}\tests\windows\CloudTestProvider\bin\Debug\net10.0\CloudTestProvider.exe
         run: python tests/safety/run_safety.py --bin windows/helper/bin/Debug/net10.0/AIStackHelper.exe --work "$env:RUNNER_TEMP/doctor" --out doctor-results.json
       - uses: actions/upload-artifact@v4
         if: always()

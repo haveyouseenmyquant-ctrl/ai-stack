@@ -106,7 +106,9 @@ public static class DoctorFS
     public static bool IsDir(string p) => Directory.Exists(p) && !IsLink(p);
     public static bool IsLink(string p)
     {
-        try { return File.GetAttributes(p).HasFlag(FileAttributes.ReparsePoint); } catch { return false; }
+        // Any reparse point counts as a link, except cloud placeholders (OneDrive & co. files are reparse points too).
+        try { return File.GetAttributes(p).HasFlag(FileAttributes.ReparsePoint) && !DoctorCloud.IsCloudTag(DoctorCloud.ReparseTag(p)); }
+        catch { return false; }
     }
     public static bool Exists(string p) => File.Exists(p) || Directory.Exists(p);
 

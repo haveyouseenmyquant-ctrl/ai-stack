@@ -39,6 +39,7 @@ struct DoctorScanner {
                     return t.count > 0 ? (r, t.size, "\(t.count) items", nil) : nil }
             case "startupItems": found = roots.flatMap(launchAgents)
             case "clamav": found = clamav(roots)
+            case "cloudFiles": skipped.append("cloud files: eviction is not implemented on macOS yet")
             case "busyProcesses":
                 out += busyProcesses().map {
                     Finding(id: Finding.itemId(c.id, "pid:\($0.pid):\($0.name)"), category: c.id, action: c.action,
