@@ -68,7 +68,8 @@ public class DoctorExecutor
         if (!File.Exists(path)) return null;
         var fi = new FileInfo(path);
         return new FileState(fi.Length, (DoctorFS.Allocated(path) + 511) / 512, DoctorFS.Unix(fi.LastWriteTimeUtc),
-                             DoctorFS.Unix(fi.CreationTimeUtc), (int)fi.Attributes, hash ? DoctorFS.Sha256File(path) : null);
+                             DoctorFS.Unix(fi.CreationTimeUtc), (int)fi.Attributes, hash ? DoctorFS.Sha256File(path) : null)
+            { MtimeTicks = fi.LastWriteTimeUtc.Ticks, BirthTicks = fi.CreationTimeUtc.Ticks };
     }
 
     /// NTFS compression into a fresh sibling → copy bytes → restore times and attributes → verify → atomic replace.
@@ -99,7 +100,7 @@ public class DoctorExecutor
         {
             CopyInto(path, temp, compressed: true);
             CrashPoint("compress-copied");
-            SetTimes(temp, before.Mtime, before.Birth);
+            SetTimes(temp, before);
             File.SetAttributes(temp, (FileAttributes)before.Mode);   // the Compressed bit itself is ignored here
         }
         catch (Exception e) { return Fail("copy: " + e.Message); }
@@ -200,8 +201,8 @@ public class DoctorExecutor
             foreach (var e in manifest.OrderByDescending(e => e.Rel.Length))
             {
                 var p = Join(out_, e.Rel);
-                if (e.Dir) { Directory.SetCreationTimeUtc(p, DoctorFS.FromUnix(e.State.Birth)); Directory.SetLastWriteTimeUtc(p, DoctorFS.FromUnix(e.State.Mtime)); }
-                else SetTimes(p, e.State.Mtime, e.State.Birth);
+                if (e.Dir) { Directory.SetCreationTimeUtc(p, e.State.BirthUtc); Directory.SetLastWriteTimeUtc(p, e.State.MtimeUtc); }
+                else SetTimes(p, e.State);
                 File.SetAttributes(p, (FileAttributes)e.State.Mode & ~FileAttributes.Compressed);
             }
             Directory.Move(out_, path);
@@ -292,7 +293,8 @@ public class DoctorExecutor
             string[] names;
             try { names = Directory.GetFileSystemEntries(p); } catch { return false; }
             var di = new DirectoryInfo(p);
-            out_.Add(new ManifestEntry(rel, true, new FileState(0, 0, DoctorFS.Unix(di.LastWriteTimeUtc), DoctorFS.Unix(di.CreationTimeUtc), (int)di.Attributes, null)));
+            out_.Add(new ManifestEntry(rel, true, new FileState(0, 0, DoctorFS.Unix(di.LastWriteTimeUtc), DoctorFS.Unix(di.CreationTimeUtc), (int)di.Attributes, null)
+                { MtimeTicks = di.LastWriteTimeUtc.Ticks, BirthTicks = di.CreationTimeUtc.Ticks }));
             foreach (var c in names.OrderBy(x => x, StringComparer.Ordinal))
             {
                 var n = Path.GetFileName(c);
@@ -365,7 +367,7 @@ public class DoctorExecutor
         {
             CopyInto(path, temp, compressed: false);
             CrashPoint("decompress-copied");
-            SetTimes(temp, before.Mtime, before.Birth);
+            SetTimes(temp, before);
             File.SetAttributes(temp, (FileAttributes)before.Mode & ~FileAttributes.Compressed);
             var s = State(temp);
             if (s == null || s.Sha256 != before.Sha256 || DoctorFS.IsCompressed(temp)) throw new IOException("verify");
@@ -498,10 +500,10 @@ public class DoctorExecutor
     public static string TempSibling(string path, string id) =>
         Path.Combine(Path.GetDirectoryName(path)!, "." + Path.GetFileName(path) + ".ld-" + id[..8]);
 
-    static void SetTimes(string path, double mtime, double birth)
+    static void SetTimes(string path, FileState s)
     {
-        File.SetCreationTimeUtc(path, DoctorFS.FromUnix(birth));
-        File.SetLastWriteTimeUtc(path, DoctorFS.FromUnix(mtime));
+        File.SetCreationTimeUtc(path, s.BirthUtc);
+        File.SetLastWriteTimeUtc(path, s.MtimeUtc);
     }
 
     /// Open in any process = can't get exclusive access.

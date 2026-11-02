@@ -370,6 +370,11 @@ def t_never_list_refused(c, res):
             forged.append({"id": "forged-" + t["id"], "category": "cache", "action": "moveToTrash", "tier": 2, "path": path,
                            "bytes": st.st_size, "reason": "forged", "fingerprint": {"size": st.st_size, "mtime": st.st_mtime,
                                                                                       "sha256": sha(path)}})
+    # The folder that holds a never-list location is refused too (moving it would take the location with it).
+    trap = next(t["path"].split("/") for t in exp["mustNotTouch"] if "/Chrome/" in t["path"])
+    holder = os.path.join(home, *trap[:trap.index("Chrome")])   # .../Google, which holds Chrome's profile
+    forged.append({"id": "forged-holder", "category": "cache", "action": "moveToTrash", "tier": 2, "path": holder,
+                   "bytes": 1, "reason": "forged parent of a never-list location", "fingerprint": {"size": 1, "mtime": 0, "sha256": None}})
     forged.append({"id": "forged-outside", "category": "cache", "action": "moveToTrash", "tier": 2, "path": MAKE,
                    "bytes": 1, "reason": "forged outside root", "fingerprint": {"size": 1, "mtime": 0, "sha256": None}})
     p["groups"] = [{"category": "cache", "action": "moveToTrash", "label": "forged", "totalBytes": 0, "items": forged}]
@@ -418,7 +423,10 @@ def planted(c, res):
     finally:
         for pr in procs:
             pr.kill()
-    found = load(report)["findings"]
+    rep = load(report)
+    found = rep["findings"]
+    for note in rep.get("skipped", []):
+        print("scan skipped:", note)   # e.g. why the malware scanner didn't run
     real = os.path.realpath(home)
     got = set()
     for f in found:

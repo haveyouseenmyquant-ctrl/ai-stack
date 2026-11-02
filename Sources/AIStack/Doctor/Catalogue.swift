@@ -86,6 +86,8 @@ struct DoctorGuard {
             DoctorCatalogue.expand($0, home: realHome).replacingOccurrences(of: realHome + "/", with: "")
         }
         for n in never where rel == n || rel.hasPrefix(n + "/") { return "never-list location (\(n))" }
+        // A folder that holds a never-list location (e.g. ~/Library/Application Support holds Chrome's profile).
+        for n in never where n.hasPrefix(rel + "/") { return "contains a never-list location (\(n))" }
         for comp in rel.split(separator: "/") {
             let c = comp.lowercased()
             if (Self.hardSuffixes + catalogue.neverNameSuffixes).contains(where: { c.hasSuffix($0) }) {

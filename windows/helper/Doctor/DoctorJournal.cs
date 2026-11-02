@@ -32,7 +32,15 @@ public class JournalRecord
 public record ManifestEntry(string Rel, bool Dir, FileState State);
 
 /// `blocks` is allocated bytes / 512 (as on macOS); `mode` holds the Windows file attributes.
-public record FileState(long Size, long Blocks, double Mtime, double Birth, int Mode, string? Sha256);
+/// Seconds as a double are ~2.4 ticks coarse at today's epoch, so the exact NTFS times (100 ns ticks) travel alongside
+/// for a byte-and-time-exact restore; records without them (older or macOS ones) fall back to the seconds.
+public record FileState(long Size, long Blocks, double Mtime, double Birth, int Mode, string? Sha256)
+{
+    public long? MtimeTicks { get; init; }
+    public long? BirthTicks { get; init; }
+    public DateTime MtimeUtc => MtimeTicks is long t ? new DateTime(t, DateTimeKind.Utc) : DoctorFS.FromUnix(Mtime);
+    public DateTime BirthUtc => BirthTicks is long t ? new DateTime(t, DateTimeKind.Utc) : DoctorFS.FromUnix(Birth);
+}
 
 /// Append-only JSONL action journal. Every record is flushed to disk before the step it describes starts.
 public class DoctorJournal
