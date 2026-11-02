@@ -21,16 +21,36 @@ jobs:
           etc="$(brew --prefix)/etc/clamav"
           sed -e 's/^Example/#Example/' "$etc/freshclam.conf.sample" > "$etc/freshclam.conf"
           mkdir -p "$(brew --prefix)/var/lib/clamav"
-      - name: Cache ClamAV signatures
-        uses: actions/cache@v4
+      - name: Restore ClamAV signatures
+        uses: actions/cache/restore@v4
         with:
           path: /opt/homebrew/var/lib/clamav
           key: clamav-db-${{ github.run_id }}
           restore-keys: clamav-db-
+      # A restored DB can fail clamscan's signature check ("Can't load daily.info: Malformed database"), so the DB
+      # must detect EICAR before it is used or cached; otherwise it is downloaded again from scratch.
       - name: Update ClamAV signatures
+        id: clamdb
         continue-on-error: true
-        timeout-minutes: 8
-        run: freshclam --stdout && ls -la "$(brew --prefix)/var/lib/clamav"
+        timeout-minutes: 10
+        run: |
+          db="$(brew --prefix)/var/lib/clamav"
+          probe="$RUNNER_TEMP/clamprobe"; mkdir -p "$probe"
+          printf '%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > "$probe/eicar.com"
+          works() { local r=0; clamscan --no-summary "$probe/eicar.com" || r=$?; [ "$r" -eq 1 ]; }
+          freshclam --stdout || true
+          if ! works; then
+            echo "restored DB does not detect EICAR; downloading it again"
+            rm -rf "$db"/*; freshclam --stdout
+            works
+          fi
+          echo "verified=true" >> "$GITHUB_OUTPUT"
+      - name: Save ClamAV signatures
+        if: steps.clamdb.outputs.verified == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/homebrew/var/lib/clamav
+          key: clamav-db-${{ github.run_id }}
       - name: Safety suite
         env: { CI: "true" }
         run: python3 tests/safety/run_safety.py --bin .build/debug/AIStack --work "$RUNNER_TEMP/doctor" --out doctor-results.json
@@ -55,6 +75,16 @@ jobs:
           dotnet build windows/helper -c Debug -nologo
           dotnet build tests/windows/CloudTestProvider -c Debug -nologo
           dotnet tool install -g dotnet-stack
+      # The runner image excludes whole drives from Defender, so nothing under D:\a\_temp (the fixture) is ever
+      # scanned. Drop the exclusions on this throwaway VM so the EICAR fixture meets a normally configured Defender.
+      - name: Defender as on a normal PC
+        continue-on-error: true
+        run: |
+          $p = Get-MpPreference
+          "exclusions: " + ($p.ExclusionPath -join ', ')
+          if ($p.ExclusionPath) { Remove-MpPreference -ExclusionPath $p.ExclusionPath }
+          $s = Get-MpComputerStatus
+          "realtime=$($s.RealTimeProtectionEnabled) antivirus=$($s.AntivirusEnabled) mode=$($s.AMRunningMode)"
       - name: Safety suite
         env:
           CI: "true"
