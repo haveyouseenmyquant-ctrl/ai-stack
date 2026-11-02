@@ -50,7 +50,7 @@
       "paths": { "macos": ["~/.Trash"], "windows": [] } },
     { "id": "persistence", "action": "disableStartupItem", "tier": 2, "ruleable": true,
       "label": "Disable {count} suspicious startup items",
-      "match": { "kind": "launchAgents" },
+      "match": { "kind": "startupItems" },
       "paths": { "macos": ["~/Library/LaunchAgents"], "windows": [] } },
     { "id": "busy-process", "action": "quitProcess", "tier": 2,
       "label": "Quit {count} processes using a lot of CPU",

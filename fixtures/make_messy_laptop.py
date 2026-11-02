@@ -177,7 +177,10 @@ def build(fx):
 
     # --- Malware test string, CI only -----------------------------------------------------------
     if os.environ.get("CI") == "true":
-        fx.write("Downloads/eicar-test.com", EICAR, age_days=10)
+        try:
+            fx.write("Downloads/eicar-test.com", EICAR, age_days=10)
+        except OSError:
+            pass   # Windows Defender can block the write itself; its detection history still records the file
         fx.plant("eicar", "malware", "Downloads/eicar-test.com", 1, "quarantine")
 
     # --- CPU-burning dummy process (started by the test harness, not here) -----------------------

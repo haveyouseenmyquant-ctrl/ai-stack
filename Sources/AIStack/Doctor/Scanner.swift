@@ -37,7 +37,7 @@ struct DoctorScanner {
             case "self": found = roots.compactMap { r in
                     let t = DoctorFS.treeStats(r)
                     return t.count > 0 ? (r, t.size, "\(t.count) items", nil) : nil }
-            case "launchAgents": found = roots.flatMap(launchAgents)
+            case "startupItems": found = roots.flatMap(launchAgents)
             case "clamav": found = clamav(roots)
             case "busyProcesses":
                 out += busyProcesses().map {

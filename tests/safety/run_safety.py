@@ -13,6 +13,8 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 MAKE = os.path.join(REPO, "fixtures", "make_messy_laptop.py")
 CATALOGUE = os.path.join(REPO, "shared", "doctor-catalogue.json")
 ARCHIVE = "Projects/Thesis 2019"
+WINDOWS = sys.platform == "win32"
+TRASH = "RecycleBinFixture" if WINDOWS else ".Trash"   # test-mode Trash / Recycle Bin inside the fixture home
 
 
 class Ctx:
@@ -73,7 +75,7 @@ def snapshot(home, skip_trash=False):
         for f in files:
             p = os.path.join(root, f)
             rel = os.path.relpath(p, home).replace(os.sep, "/")
-            if (skip_trash and rel.startswith(".Trash/")) or ".ld-" in rel:
+            if (skip_trash and rel.startswith(TRASH + "/")) or ".ld-" in rel:
                 continue
             if rel == ARCHIVE + ".zip" and not os.path.isdir(os.path.join(home, ARCHIVE)):
                 snap.update(zip_members(p, ARCHIVE))
@@ -83,14 +85,29 @@ def snapshot(home, skip_trash=False):
     return snap
 
 
+def allocated(p):
+    """Bytes on disk: st_blocks on macOS, GetCompressedFileSizeW (the NTFS compressed size) on Windows."""
+    if not WINDOWS:
+        return os.lstat(p).st_blocks * 512
+    import ctypes
+    hi = ctypes.c_ulong(0)
+    lo = ctypes.windll.kernel32.GetCompressedFileSizeW(ctypes.c_wchar_p(p), ctypes.byref(hi))
+    return (hi.value << 32) | lo
+
+
 def blocks(home):
-    return sum(os.lstat(os.path.join(r, f)).st_blocks * 512 for r, _, fs in os.walk(home) for f in fs)
+    return sum(allocated(os.path.join(r, f)) for r, _, fs in os.walk(home) for f in fs)
+
+
+def is_compressed(p):
+    st = os.lstat(p)
+    if WINDOWS:
+        return bool(st.st_file_attributes & stat.FILE_ATTRIBUTE_COMPRESSED)
+    return bool(getattr(st, "st_flags", 0) & getattr(stat, "UF_COMPRESSED", 0x20))
 
 
 def compressed_files(home):
-    flag = getattr(stat, "UF_COMPRESSED", 0x20)
-    return [os.path.join(r, f) for r, _, fs in os.walk(home) for f in fs
-            if getattr(os.lstat(os.path.join(r, f)), "st_flags", 0) & flag]
+    return [os.path.join(r, f) for r, _, fs in os.walk(home) for f in fs if is_compressed(os.path.join(r, f))]
 
 
 def leftovers(home):
@@ -244,6 +261,25 @@ def t_quarantine_roundtrip_and_crash_points(c, res):
         assert not glob.glob(os.path.join(home, QUARANTINE, "*", "*")), f"{point}: quarantine not empty"
 
 
+def t_crash_points_compress(c, res):
+    """Power cut after the compressed copy, after it verified, and during the undo copy: the original stays intact."""
+    home, exp, j, out = c.fixture()
+    before = snapshot(home)
+    for verb, point in [("tier1", "compress-copied"), ("tier1", "compress-verified"), ("undo", "decompress-copied")]:
+        if verb == "undo":
+            c.doctor("tier1", "--root", home, "--journal", j)
+        r = subprocess.run([c.bin, "--doctor", verb, "--catalogue", CATALOGUE, "--root", home, "--journal", j],
+                           env=dict(os.environ, LD_CRASH_AT=point), capture_output=True)
+        assert r.returncode != 0, f"{point}: crash point was not reached"
+        now = snapshot(home)
+        assert not diff(before, now, "hash"), f"{point}: files missing or changed: {diff(before, now)[:5]}"
+        c.doctor("recover", "--root", home, "--journal", j)
+        assert not leftovers(home), f"{point}: temp files left after recover: {leftovers(home)}"
+        c.doctor("undo", "--root", home, "--journal", j)
+        assert not diff(before, snapshot(home), "all"), f"{point}: recover + undo did not restore the tree"
+        assert not compressed_files(home), f"{point}: still compressed after undo"
+
+
 def t_archive_refuses_changed_or_odd_folders(c, res):
     """A symlink inside the folder, or an existing <folder>.zip, means no archiving at all."""
     home, exp, j, out = c.fixture()
@@ -279,7 +315,7 @@ def t_changed_between_plan_and_execute(c, res):
     with open(dup, "r+b") as f:          # same size, same mtime, different bytes
         f.write(b"CHANGED!")
     os.utime(dup, ns=(st.st_atime_ns, st.st_mtime_ns))
-    inst = os.path.join(home, "Downloads", "SomeApp-Installer-0.dmg")
+    inst = os.path.join(home, *[x for x in exp["planted"] if x["id"] == "installer-0"][0]["path"].split("/"))
     with open(inst, "ab") as f:          # grows and gets a fresh mtime
         f.write(b"more")
     before = snapshot(home, skip_trash=True)
@@ -396,7 +432,7 @@ def planted(c, res):
 
 
 SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_archive_refuses_changed_or_odd_folders,
-          t_quarantine_roundtrip_and_crash_points,
+          t_crash_points_compress if WINDOWS else t_quarantine_roundtrip_and_crash_points,
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
           t_writes_need_root]

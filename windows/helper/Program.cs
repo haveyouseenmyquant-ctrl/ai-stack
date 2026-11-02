@@ -9,6 +9,12 @@ if (args.Length > 0 && (args[0].StartsWith("chrome-extension://") || args[0] == 
     return;
 }
 
+// Laptop Doctor's headless CLI (safety suite and CI); prints JSON only, so it runs before console logging is set up.
+if (args.FirstOrDefault() == "--doctor")
+{
+    Environment.Exit(AIStack.Doctor.DoctorCli.Run(args[1..]));
+}
+
 Log.EchoToConsole = true;
 switch (args.FirstOrDefault())
 {
