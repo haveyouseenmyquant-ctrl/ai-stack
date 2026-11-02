@@ -8,16 +8,7 @@ namespace AIStack.Doctor;
 /// and opening or hydrating the file downloads it again.
 public static class DoctorCloud
 {
-    const uint FILE_ATTRIBUTE_PINNED = 0x80000, FILE_ATTRIBUTE_UNPINNED = 0x100000, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000;
-
-    /// By default the cloud filter disguises placeholders as plain files (no reparse attribute, no tag); the doctor
-    /// needs to see them to tell evictable files from links. Process-wide; call once at startup.
-    public static void ExposePlaceholders()
-    {
-        if (!OperatingSystem.IsWindows()) return;
-        try { RtlSetProcessPlaceholderCompatibilityMode(2 /* PHCM_EXPOSE_PLACEHOLDERS */); } catch { }
-        try { RtlSetThreadPlaceholderCompatibilityMode(2); } catch { }
-    }
+    const uint FILE_ATTRIBUTE_PINNED = 0x80000, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000;
 
     /// IO_REPARSE_TAG_CLOUD and its CLOUD_1..F variants (0x9000x01A).
     public static bool IsCloudTag(uint tag) => (tag & 0xFFFF0FFF) == 0x9000001A;
@@ -34,17 +25,28 @@ public static class DoctorCloud
 
     public record State(bool InSync, bool Pinned, bool Dehydrated);
 
-    /// null = not a cloud placeholder. Reads attributes only, so it never triggers a download.
+    /// True if the folder is a sync root or inside one. Placeholders are disguised as plain files to most processes
+    /// (no reparse attribute), so the sync root, not the attributes, says where to look.
+    public static bool InSyncRoot(string dir)
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        var buf = new byte[512];
+        try { return CfGetSyncRootInfoByPath(dir, 0 /* CF_SYNC_ROOT_INFO_BASIC */, buf, buf.Length, out _) >= 0; }
+        catch (DllNotFoundException) { return false; }
+    }
+
+    /// null = not a cloud placeholder. Reads placeholder metadata only, so it never triggers a download.
     public static State? PlaceholderState(string path)
     {
-        if (!OperatingSystem.IsWindows() || !IsCloudTag(ReparseTag(path))) return null;
+        if (!OperatingSystem.IsWindows()) return null;
         using var h = Open(path, FILE_READ_ATTRIBUTES, share: 7);
         if (h.IsInvalid) return null;
-        var buf = new byte[64];
-        if (CfGetPlaceholderInfo(h, 0 /* CF_PLACEHOLDER_INFO_BASIC */, buf, buf.Length, out _) < 0) return null;
-        int pin = BitConverter.ToInt32(buf, 0), inSync = BitConverter.ToInt32(buf, 4);
+        var buf = new byte[4096];   // CF_PLACEHOLDER_STANDARD_INFO plus the provider's file identity
+        if (CfGetPlaceholderInfo(h, 1 /* CF_PLACEHOLDER_INFO_STANDARD */, buf, buf.Length, out _) < 0) return null;
+        long onDisk = BitConverter.ToInt64(buf, 0);
+        int pin = BitConverter.ToInt32(buf, 32), inSync = BitConverter.ToInt32(buf, 36);
         var attrs = (uint)File.GetAttributes(path);
-        var dehydrated = (attrs & (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | (uint)FileAttributes.Offline)) != 0 || DoctorFS.Allocated(path) == 0 && new FileInfo(path).Length > 0;
+        var dehydrated = onDisk < new FileInfo(path).Length || (attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0;
         return new State(inSync == 1, pin == 1 /* CF_PIN_STATE_PINNED */ || (attrs & FILE_ATTRIBUTE_PINNED) != 0, dehydrated);
     }
 
@@ -86,8 +88,8 @@ public static class DoctorCloud
     [DllImport("kernel32.dll")] static extern bool FindClose(IntPtr h);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
-    [DllImport("ntdll.dll")] static extern sbyte RtlSetProcessPlaceholderCompatibilityMode(sbyte mode);
-    [DllImport("ntdll.dll")] static extern sbyte RtlSetThreadPlaceholderCompatibilityMode(sbyte mode);
+    [DllImport("cldapi.dll", CharSet = CharSet.Unicode)]
+    static extern int CfGetSyncRootInfoByPath(string path, int infoClass, byte[] info, int length, out int returned);
     [DllImport("cldapi.dll")]
     static extern int CfGetPlaceholderInfo(SafeFileHandle h, int infoClass, byte[] info, int length, out int returned);
     [DllImport("cldapi.dll")]

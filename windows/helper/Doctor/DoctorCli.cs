@@ -43,7 +43,6 @@ public static class DoctorCli
         var root = One("root") is string r ? Path.GetFullPath(r) : null;
         var home = root ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var catalogue = DoctorCatalogue.Load(One("catalogue"));
-        DoctorCloud.ExposePlaceholders();
         var checkup = One("checkup") ?? DoctorFS.Iso();
         var archive = (values.GetValueOrDefault("archive") ?? new()).Select(p => Path.IsPathRooted(p) ? p : Path.Combine(home, p)).ToList();
         if (verb is "tier1" or "approve" or "execute" or "undo" or "recover" && root == null)

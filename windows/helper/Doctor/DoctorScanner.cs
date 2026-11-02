@@ -116,6 +116,8 @@ public class DoctorScanner
                     // Hidden folders, AppData (app and system data), git trees and opted-in folders are not walked.
                     if (name.StartsWith('.') || p.Equals(Path.Combine(home, "AppData"), DoctorFS.PathCmp)) continue;
                     if (DoctorFS.Exists(Path.Combine(p, ".git")) || optedIn.Contains(p, StringComparer.OrdinalIgnoreCase)) continue;
+                    // Cloud placeholders are evicted, never replaced by a compressed copy (that would detach them from the provider).
+                    if (DoctorCloud.InSyncRoot(p)) continue;
                     try { if (File.GetAttributes(p).HasFlag(FileAttributes.Hidden | FileAttributes.System)) continue; } catch { continue; }
                     Walk(p);
                     continue;
@@ -145,24 +147,22 @@ public class DoctorScanner
         var out_ = new List<Hit>();
         if (!OperatingSystem.IsWindows()) return out_;
         double cold = catalogue.Value("cloudColdDays");
-        void Walk(string dir)
+        void Walk(string dir, bool synced)
         {
+            synced = synced || DoctorCloud.InSyncRoot(dir);
             foreach (var p in DoctorFS.List(dir))
             {
                 if (DoctorFS.IsLink(p)) continue;
                 if (Directory.Exists(p))
                 {
-                    if (p.Equals(Path.Combine(home, "AppData"), DoctorFS.PathCmp)) continue;
-                    Walk(p);
+                    if (!p.Equals(Path.Combine(home, "AppData"), DoctorFS.PathCmp)) Walk(p, synced);
                     continue;
                 }
-                try { if (!File.GetAttributes(p).HasFlag(FileAttributes.ReparsePoint)) continue; } catch { continue; }
-                if (!DoctorCloud.IsCloudTag(DoctorCloud.ReparseTag(p)))
-                { Skipped.Add($"cloud files: {Rel(p)}: reparse point 0x{DoctorCloud.ReparseTag(p):X8} is not a cloud file"); continue; }
+                if (!synced) continue;
                 var st = DoctorCloud.PlaceholderState(p);
                 if (st is not { InSync: true, Pinned: false, Dehydrated: false })
                 {
-                    Skipped.Add($"cloud files: {Rel(p)}: kept ({st?.ToString() ?? "placeholder info unreadable"})");
+                    Skipped.Add($"cloud files: {Rel(p)}: kept ({st?.ToString() ?? "not a placeholder"})");
                     continue;
                 }
                 var fi = new FileInfo(p);
@@ -170,7 +170,7 @@ public class DoctorScanner
                 out_.Add(new Hit(p, DoctorFS.Allocated(p), $"synced to the cloud, untouched {AgeDays(fi.LastWriteTimeUtc):F0} days"));
             }
         }
-        Walk(home);
+        Walk(home, false);
         return out_;
     }
 
