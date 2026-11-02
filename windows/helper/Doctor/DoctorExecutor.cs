@@ -194,16 +194,42 @@ public class DoctorExecutor
             SetCompression(o.SafeFileHandle, compressed);
             o.Flush(flushToDisk: true);
         }
-        new FileInfo(dst).SetAccessControl(new FileInfo(src).GetAccessControl(AccessControlSections.Access));
+        // A FileSecurity only writes the sections it has marked changed, so go through SDDL (inherited ACEs in it are ignored).
+        var acl = new FileSecurity();
+        acl.SetSecurityDescriptorSddlForm(new FileInfo(src).GetAccessControl(AccessControlSections.Access)
+                                          .GetSecurityDescriptorSddlForm(AccessControlSections.Access), AccessControlSections.Access);
+        new FileInfo(dst).SetAccessControl(acl);
     }
 
-    /// Named data streams or explicit (non-inherited) permissions: a zip holds neither, so archiving would drop them.
-    static string? ZipLoses(string path, bool dir)
+    /// The explicit (non-inherited) part of a DACL, comparable across files.
+    static string OwnAcl(string path, bool dir)
     {
-        if (!OperatingSystem.IsWindows()) return null;
         FileSystemSecurity acl = dir ? new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access)
                                      : new FileInfo(path).GetAccessControl(AccessControlSections.Access);
-        if (acl.AreAccessRulesProtected || acl.GetAccessRules(true, false, typeof(SecurityIdentifier)).Count > 0) return "its own permissions";
+        return acl.AreAccessRulesProtected + ":" + string.Join(",", acl.GetAccessRules(true, false, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>().Select(r => $"{r.IdentityReference}/{r.FileSystemRights}/{r.AccessControlType}/{r.InheritanceFlags}/{r.PropagationFlags}")
+            .OrderBy(x => x, StringComparer.Ordinal));
+    }
+
+    /// What a file and a folder created next to `tag` get by default (inherited, or the token's default DACL), i.e. what
+    /// the files extracted by Undo will have.
+    static (string File, string Dir) DefaultAcls(string tag)
+    {
+        var probe = tag + "-p";
+        try
+        {
+            Directory.CreateDirectory(probe);
+            File.WriteAllBytes(Path.Combine(probe, "f"), Array.Empty<byte>());
+            return (OwnAcl(Path.Combine(probe, "f"), false), OwnAcl(probe, true));
+        }
+        finally { RemoveTree(probe); }
+    }
+
+    /// Named data streams, or permissions other than the default: a zip holds neither, so archiving would drop them.
+    static string? ZipLoses(string path, bool dir, (string File, string Dir) defaults)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        if (OwnAcl(path, dir) != (dir ? defaults.Dir : defaults.File)) return "its own permissions";
         var h = FindFirstStreamW(path, 0, out var d, 0);
         if (h == new IntPtr(-1)) return null;
         try
@@ -230,9 +256,14 @@ public class DoctorExecutor
         if (Manifest(path) is not { } manifest) { Log(f, "skipped", "contains links or unreadable files"); return ("skipped", 0); }
         if (manifest.FirstOrDefault(e => !e.Dir && IsOpen(Join(path, e.Rel))) is { } open)
         { Log(f, "skipped", open.Rel + " is open in another process"); return ("skipped", 0); }
-        foreach (var e in manifest)
-            if (ZipLoses(Join(path, e.Rel), e.Dir) is string lost)
-            { Log(f, "skipped", (e.Rel.Length == 0 ? "the folder" : e.Rel) + " has " + lost + ", which a zip can't keep"); return ("skipped", 0); }
+        try
+        {
+            var defaults = OperatingSystem.IsWindows() ? DefaultAcls(ArchiveTag(path, DoctorJournal.NewId())) : ("", "");
+            foreach (var e in manifest)
+                if (ZipLoses(Join(path, e.Rel), e.Dir, defaults) is string lost)
+                { Log(f, "skipped", (e.Rel.Length == 0 ? "the folder" : e.Rel) + " has " + lost + ", which a zip can't keep"); return ("skipped", 0); }
+        }
+        catch (Exception e) { Log(f, "skipped", "could not read permissions: " + e.Message); return ("skipped", 0); }
         var id = DoctorJournal.NewId();
         var tag = ArchiveTag(path, id);
         string temp = tag + ".zip", check = tag + "-v", aside = tag + "-d";
