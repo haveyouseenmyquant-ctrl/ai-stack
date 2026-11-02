@@ -336,15 +336,23 @@ public class DoctorScanner
         return Run(tool, args).Text.Trim();
     }
 
-    public static (int Status, string Text) Run(string tool, string args)
+    /// Runs a read-only tool. Both pipes are drained concurrently (reading one to the end first can deadlock when
+    /// the other fills), and a tool that runs past `timeoutSec` is killed with its children and reported as -1.
+    public static (int Status, string Text) Run(string tool, string args, int timeoutSec = 180)
     {
         try
         {
             using var p = Process.Start(new ProcessStartInfo(tool, args)
                 { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true })!;
-            var text = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+            var stdout = p.StandardOutput.ReadToEndAsync();
+            var stderr = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(timeoutSec * 1000))
+            {
+                try { p.Kill(entireProcessTree: true); } catch { }
+                return (-1, $"{Path.GetFileName(tool)} timed out after {timeoutSec} s");
+            }
             p.WaitForExit();
-            return (p.ExitCode, text);
+            return (p.ExitCode, stdout.Result + stderr.Result);
         }
         catch (Exception e) { return (-1, e.Message); }
     }
@@ -383,6 +391,7 @@ public class DoctorScanner
             foreach (var root in roots.Where(Directory.Exists))
             {
                 var r = Run(mp, $"-Scan -ScanType 3 -File \"{root}\" -DisableRemediation");
+                if (r.Status == -1) Skipped.Add($"malware: Defender scan of {Rel(root)}: {r.Text}");
                 // Exit code 2 = threats found. The listing format varies by version, so pick out every "file:_" resource.
                 if (r.Status == 2)
                     foreach (var line in r.Text.Split('\n'))

@@ -54,6 +54,7 @@ jobs:
         run: |
           dotnet build windows/helper -c Debug -nologo
           dotnet build tests/windows/CloudTestProvider -c Debug -nologo
+          dotnet tool install -g dotnet-stack
       - name: Safety suite
         env:
           CI: "true"

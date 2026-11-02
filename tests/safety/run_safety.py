@@ -17,6 +17,32 @@ WINDOWS = sys.platform == "win32"
 TRASH = "RecycleBinFixture" if WINDOWS else ".Trash"   # test-mode Trash / Recycle Bin inside the fixture home
 
 
+# One helper call should take seconds; a hang (e.g. a blocked Cloud Files request) must fail one test, not the job.
+CMD_TIMEOUT = 240
+
+
+def run_bin(cmd, env=None, text=False):
+    """subprocess.run with a watchdog. On timeout it prints the hung process's managed stacks (dotnet-stack, if
+    installed) and kills its whole process tree, so inherited pipes can't block the suite."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, env=env)
+    try:
+        out, err = p.communicate(timeout=CMD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        if WINDOWS and shutil.which("dotnet-stack"):
+            st = subprocess.run(["dotnet-stack", "report", "-p", str(p.pid)], capture_output=True, text=True, timeout=60)
+            print(f"hung after {CMD_TIMEOUT}s: {cmd[1:4]}\n{st.stdout[-6000:]}{st.stderr[-1000:]}", flush=True)
+        if WINDOWS:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+        else:
+            p.kill()
+        try:
+            p.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+        raise AssertionError(f"timed out after {CMD_TIMEOUT}s: {' '.join(map(str, cmd[1:4]))}")
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
+
 class Ctx:
     def __init__(self, binary, work):
         self.bin, self.work, self.n, self.journals, self.providers = os.path.abspath(binary), os.path.abspath(work), 0, [], []
@@ -53,7 +79,7 @@ class Ctx:
 
     def doctor(self, verb, *args, check=True, env=None):
         cmd = [self.bin, "--doctor", verb, "--catalogue", CATALOGUE, *args]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=merged(env))
+        r = run_bin(cmd, env=merged(env), text=True)
         if check and r.returncode != 0:
             raise AssertionError(f"{verb} failed rc={r.returncode}: {r.stderr.strip()[:400]}")
         return r
@@ -194,8 +220,8 @@ def t_crash_points_archive(c, res):
     before = snapshot(home)
     folder, zipf = os.path.join(home, ARCHIVE), os.path.join(home, ARCHIVE + ".zip")
     def run(verb, point, *extra):
-        r = subprocess.run([c.bin, "--doctor", verb, "--catalogue", CATALOGUE, "--root", home, "--journal", j, *extra],
-                           env=dict(os.environ, LD_CRASH_AT=point), capture_output=True)
+        r = run_bin([c.bin, "--doctor", verb, "--catalogue", CATALOGUE, "--root", home, "--journal", j, *extra],
+                           env=dict(os.environ, LD_CRASH_AT=point))
         assert r.returncode != 0, f"{point}: crash point was not reached"
     def intact(point):
         now = snapshot(home)
@@ -270,8 +296,8 @@ def t_quarantine_roundtrip_and_crash_points(c, res):
     for verb, point in [("tier1", "quarantine-intent"), ("tier1", "quarantine-moved"), ("undo", "unquarantine-moved")]:
         if verb == "undo":
             c.doctor("tier1", "--root", home, "--journal", j, env=env)
-        r = subprocess.run([c.bin, "--doctor", verb, "--catalogue", CATALOGUE, "--root", home, "--journal", j],
-                           env=dict(os.environ, LD_CRASH_AT=point, **env), capture_output=True)
+        r = run_bin([c.bin, "--doctor", verb, "--catalogue", CATALOGUE, "--root", home, "--journal", j],
+                           env=dict(os.environ, LD_CRASH_AT=point, **env))
         assert r.returncode != 0, f"{point}: crash point was not reached"
         intact(point)
         c.doctor("recover", "--root", home, "--journal", j)
@@ -289,8 +315,8 @@ def t_crash_points_compress(c, res):
     for verb, point in [("tier1", "compress-copied"), ("tier1", "compress-verified"), ("undo", "decompress-copied")]:
         if verb == "undo":
             c.doctor("tier1", "--root", home, "--journal", j)
-        r = subprocess.run([c.bin, "--doctor", verb, "--catalogue", CATALOGUE, "--root", home, "--journal", j],
-                           env=dict(os.environ, LD_CRASH_AT=point), capture_output=True)
+        r = run_bin([c.bin, "--doctor", verb, "--catalogue", CATALOGUE, "--root", home, "--journal", j],
+                           env=dict(os.environ, LD_CRASH_AT=point))
         assert r.returncode != 0, f"{point}: crash point was not reached"
         now = snapshot(home)
         assert not diff(before, now, "hash"), f"{point}: files missing or changed: {diff(before, now)[:5]}"
@@ -311,8 +337,8 @@ def t_evict_cloud_roundtrip(c, res):
     pinned = cloud.pop()
     subprocess.run(["attrib", "+P", pinned], check=True, capture_output=True)
     before = snapshot(home)
-    r = subprocess.run([c.bin, "--doctor", "tier1", "--catalogue", CATALOGUE, "--root", home, "--journal", j],
-                       env=dict(os.environ, LD_CRASH_AT="evict-intent"), capture_output=True)
+    r = run_bin([c.bin, "--doctor", "tier1", "--catalogue", CATALOGUE, "--root", home, "--journal", j],
+                       env=dict(os.environ, LD_CRASH_AT="evict-intent"))
     assert r.returncode != 0, "evict-intent: crash point was not reached"
     c.doctor("recover", "--root", home, "--journal", j)
     c.doctor("tier1", "--root", home, "--journal", j)
