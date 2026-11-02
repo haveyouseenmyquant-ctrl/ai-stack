@@ -181,7 +181,8 @@ def build(fx):
             fx.write("Downloads/eicar-test.com", EICAR, age_days=10)
         except OSError:
             pass   # Windows Defender can block the write itself; its detection history still records the file
-        fx.plant("eicar", "malware", "Downloads/eicar-test.com", 1, "quarantine")
+        # Windows: Defender quarantines it itself, so the checkup only reports it (Tier 0) and links to its history.
+        fx.plant("eicar", "malware", "Downloads/eicar-test.com", *((0, "report") if sys.platform == "win32" else (1, "quarantine")))
 
     # --- CPU-burning dummy process (started by the test harness, not here) -----------------------
     burner = fx.write("Library/Application Support/BusyHelper/busyhelper.py" if mac else

@@ -23,7 +23,7 @@
     { "id": "malware", "action": "quarantine", "tier": 1,
       "label": "Quarantine {count} files ClamAV flags as malware (undo restores them)",
       "match": { "kind": "clamav" },
-      "paths": { "macos": ["~/Downloads", "~/Desktop"], "windows": [] } },
+      "paths": { "macos": ["~/Downloads", "~/Desktop"], "windows": ["%USERPROFILE%\\Downloads", "%USERPROFILE%\\Desktop"] } },
     { "id": "cache", "action": "moveToTrash", "tier": 2, "ruleable": true,
       "label": "Delete {count} app caches (apps rebuild them)",
       "match": { "kind": "children" },

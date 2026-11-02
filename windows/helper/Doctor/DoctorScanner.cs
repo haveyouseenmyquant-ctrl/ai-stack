@@ -60,7 +60,13 @@ public class DoctorScanner
                     }
                     break;
                 case "startupItems": found = RunKeys(); break;
-                case "clamav": Skipped.Add("malware: Windows Defender scans and quarantines files itself; its history is not read yet"); break;
+                case "clamav":
+                    // Windows Defender quarantines files itself, so these are reported (Tier 0), never acted on.
+                    foreach (var d in DefenderDetections(roots))
+                        out_.Add(new Finding { Id = Finding.ItemId(c.Id, d.Path), Category = c.Id, Action = DoctorAction.Report, Tier = 0,
+                                               Path = d.Path, Bytes = File.Exists(d.Path) ? new FileInfo(d.Path).Length : 0,
+                                               Reason = $"Windows Defender detected {d.Threat}; restore or remove it in Windows Security > Protection history" });
+                    break;
                 case "busyProcesses":
                     foreach (var b in BusyProcesses())
                         out_.Add(new Finding { Id = Finding.ItemId(c.Id, $"pid:{b.Pid}:{b.Name}"), Category = c.Id, Action = c.Action,
@@ -302,6 +308,51 @@ public class DoctorScanner
             return (p.ExitCode, text);
         }
         catch (Exception e) { return (-1, e.Message); }
+    }
+
+    // ---- Windows Defender (read-only: history, plus a custom scan with remediation off)
+
+    /// Files under `roots` that Defender has detected: its detection history, then a custom scan of the roots with
+    /// -DisableRemediation (reports without touching anything) for files real-time protection hasn't seen.
+    List<(string Path, string Threat)> DefenderDetections(List<string> roots)
+    {
+        var hits = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (!OperatingSystem.IsWindows()) { Skipped.Add("malware: Windows Defender needs Windows"); return new(); }
+        bool Under(string p) => roots.Any(r => p.StartsWith(r.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase));
+        void Add(string resource, string threat)
+        {
+            // Resources look like "file:_C:\path\name" (or "containerfile:_…" for archives).
+            var i = resource.IndexOf(":_", StringComparison.Ordinal);
+            if (i < 0) return;
+            var p = resource[(i + 2)..].Trim();
+            if (p.Contains("->")) p = p[..p.IndexOf("->", StringComparison.Ordinal)];
+            try { p = Path.GetFullPath(p); } catch { return; }
+            if (Under(p)) hits.TryAdd(p, threat);
+        }
+        void History()
+        {
+            var r = Run("powershell.exe", "-NoProfile -NonInteractive -Command \"$t=@{}; Get-MpThreat | % { $t[[string]$_.ThreatID]=$_.ThreatName }; " +
+                        "Get-MpThreatDetection | % { $n=$t[[string]$_.ThreatID]; foreach($x in $_.Resources){ $n + '|' + $x } }\"");
+            if (r.Status != 0) { Skipped.Add("malware: Defender history unreadable: " + r.Text.Trim().Split('\n')[0]); return; }
+            foreach (var line in r.Text.Split('\n'))
+                if (line.Split('|', 2) is [var threat, var res]) Add(res.Trim(), threat.Trim().Length > 0 ? threat.Trim() : "a threat");
+        }
+        History();
+        var mp = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Windows Defender", "MpCmdRun.exe");
+        if (File.Exists(mp))
+        {
+            foreach (var root in roots.Where(Directory.Exists))
+            {
+                var r = Run(mp, $"-Scan -ScanType 3 -File \"{root}\" -DisableRemediation");
+                // Exit code 2 = threats found. The listing format varies by version, so pick out every "file:_" resource.
+                if (r.Status == 2)
+                    foreach (var line in r.Text.Split('\n'))
+                        if (line.Contains(":_")) Add(line.Trim(), "a threat");
+            }
+            History();
+        }
+        else Skipped.Add("malware: MpCmdRun.exe not found; only Defender's history was read");
+        return hits.Select(kv => (kv.Key, kv.Value)).ToList();
     }
 
     // ---- Security posture (read-only queries; no admin needed)
