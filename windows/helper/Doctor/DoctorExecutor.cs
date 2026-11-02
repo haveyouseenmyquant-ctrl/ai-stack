@@ -120,11 +120,14 @@ public class DoctorExecutor
 
     /// Frees the local copy of an in-sync cloud placeholder. One call, and either state is lossless: the provider
     /// holds the bytes, so a crash leaves the file local or evicted, never missing. Undo downloads it again.
+    bool cloudStuck;
+
     (string, long) EvictCloud(Finding f)
     {
         var path = f.Path;
         if (guardian.Refusal(path) is string why) { Log(f, "refused", why); return ("refused", 0); }
         if (!OperatingSystem.IsWindows()) { Log(f, "skipped", "cloud eviction needs Windows"); return ("skipped", 0); }
+        if (cloudStuck) { Log(f, "skipped", "an earlier cloud eviction is stuck"); return ("skipped", 0); }
         if (DoctorCloud.PlaceholderState(path) is not { InSync: true, Pinned: false, Dehydrated: false })
         { Log(f, "skipped", "not an in-sync, unpinned, local cloud file any more"); return ("skipped", 0); }
         var before = State(path);
@@ -136,7 +139,15 @@ public class DoctorExecutor
                                       PlanItem = f.Id, From = path, To = path, Before = before, Reason = f.Reason };
         journal.Append(rec);
         CrashPoint("evict-intent");
-        try { DoctorCloud.Dehydrate(path); }
+        try
+        {
+            if (!DoctorCloud.Dehydrate(path))
+            {   // Left at `intent`: the next run's recover records it as done or failed from what is on disk.
+                Log(f, "skipped", "cloud eviction still running after 60 s; recover will settle it");
+                cloudStuck = true;
+                return ("skipped", 0);
+            }
+        }
         catch (Exception e)
         {
             var fl = rec.Copy(); fl.Phase = "failed"; fl.Reason = e.Message; fl.Ts = DoctorFS.Iso();
