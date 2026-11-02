@@ -614,9 +614,10 @@ def t_report_window_decisions(c, res):
         return [json.loads(l) for l in open(j)]
     before = snapshot(home, skip_trash=True)
     n = len(journal())
-    mixed = cat("trash") + cat("cache")
-    assert cat("trash") and cat("cache"), "fixture lacks trash or cache items"
-    assert decide("always", mixed, check=False).returncode != 0, "always accepted a group with emptying the Trash"
+    lossy = cat("trash") or cat("busy-process")
+    mixed = lossy + cat("cache")
+    assert lossy and cat("cache"), "fixture lacks Trash/busy-process or cache items"
+    assert decide("always", mixed, check=False).returncode != 0, "always accepted a group with a lossy kind"
     assert len(journal()) == n and not os.path.exists(os.path.join(d, "rules.json")), "a refused 'always' still recorded something"
     dup = cat("duplicate")[0]
     decide("decline", [dup])
@@ -701,7 +702,7 @@ SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_arch
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
           t_writes_need_root, t_summary_sends_no_user_names, t_checkup_respects_switches, t_schedule_once_per_slot,
-          t_plans_carry_over_and_rules] + ([t_evict_cloud_roundtrip] if WINDOWS else [t_report_window_decisions])
+          t_plans_carry_over_and_rules] + ([t_evict_cloud_roundtrip] if WINDOWS else []) + [t_report_window_decisions]
 
 
 def main():

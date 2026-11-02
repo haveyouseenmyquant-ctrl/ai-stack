@@ -267,7 +267,7 @@ One call per checkup through the existing `ClaudeCLI` / `ClaudeCli` (haiku). The
 - **Rules**: a rule names one catalogue category. It's allowed only if the catalogue marks the category `ruleable` *and* the action is ruleable (Trash moves, disabling a startup item) *and* the category's tier is 2. This is checked on `rule-add` and again on every load, so a hand-edited `rules.json` can't add emptying the Trash or killing processes. In the checkup, a ruled item gets an `approval` record `by: rule:<id>` and then goes through the normal `execute()`: never-list, approval match, and an unchanged-target re-check. It isn't put on the plan or kept in pending. Undo works as for any Trash move.
 - Outcome JSON gains `carried`, `expired`, `suppressed` and `ruled`. Safety test `t_plans_carry_over_and_rules` (both platforms) covers one entry per item, decline suppression, carry-over when the scan stops flagging an item, expiry 31 days later, refused rules (`trash`, `busy-process`, Tier 1), ignored forged rules, a cache rule running only Trash moves, the never-list untouched, and undo.
 
-## 19. The report window (macOS)
+## 19. The report window (macOS), and the same decisions on Windows
 
 - `Doctor/Desk.swift` (`DoctorDesk`) holds everything the window's buttons do, with no UI, and the CLI exposes it as `decide`, `history` and `undo-checkup`. The safety test `t_report_window_decisions` drives that same path.
   - **Approve** records one approval per ticked item (by "user"). Then only those items run through `execute()`, which applies the never-list, the approval match and the unchanged re-check. Approving an item twice does nothing.
@@ -278,3 +278,4 @@ One call per checkup through the existing `ClaudeCLI` / `ClaudeCli` (haiku). The
 - The summary card shows a template built from the report and outcome. With the Claude switch on, a button asks Claude for a summary from `DoctorSummary.facts` only and saves it as `summary.txt` in the checkup folder.
 - "Approve all" has no Return-key shortcut. A destructive batch takes a deliberate click.
 - `--doctor render` draws the window offscreen to a PNG from a fixture. The README screenshots come from it, never from real data.
+- Windows: `Doctor/DoctorDesk.cs` has the same `decide`/`history`/`undo-checkup` verbs, and the same test runs there. An evicted file can be undone (rehydrate), and Defender quarantine is restored from Windows Security. The Windows UI surface is still to do.

@@ -10,6 +10,10 @@ namespace AIStack.Doctor;
 ///     AIStackHelper --doctor approve --plan plan.json --journal <file> [--items id,id | --all] [--by user|rule:<id>]
 ///     AIStackHelper --doctor decline --plan plan.json --journal <file> [--items id,id | --all]
 ///     AIStackHelper --doctor rule-add --root <home> --dir <checkups dir> --category <id>   ("always do this"; ruleable kinds only)
+///     AIStackHelper --doctor decide  --root <home> --journal <file> --dir <checkups dir> --plan plan.json --decision approve|decline|always
+///                                    [--items id,id | --all]   (what the report's buttons do)
+///     AIStackHelper --doctor history --journal <file>
+///     AIStackHelper --doctor undo-checkup --root <home> --journal <file> --checkup <id>
 ///     AIStackHelper --doctor execute --root <home> --plan plan.json --journal <file>
 ///     AIStackHelper --doctor undo    --root <home> --journal <file> [--entry <id>]
 ///     AIStackHelper --doctor recover --root <home> --journal <file>
@@ -52,7 +56,7 @@ public static class DoctorCli
         var catalogue = DoctorCatalogue.Load(One("catalogue"));
         var checkup = One("checkup") ?? DoctorFS.Iso();
         var archive = (values.GetValueOrDefault("archive") ?? new()).Select(p => Path.IsPathRooted(p) ? p : Path.Combine(home, p)).ToList();
-        if (verb is "tier1" or "checkup" or "approve" or "decline" or "rule-add" or "execute" or "undo" or "recover" && root == null)
+        if (verb is "tier1" or "checkup" or "decide" or "undo-checkup" or "approve" or "decline" or "rule-add" or "execute" or "undo" or "recover" && root == null)
             throw new InvalidOperationException($"{verb} needs --root <fixture home>; real-profile writes are not enabled");
         if (root != null && !Directory.Exists(home)) throw new InvalidOperationException($"no such root {home}");
 
@@ -136,6 +140,19 @@ public static class DoctorCli
                 Emit(rule, null);
                 break;
             }
+            case "decide":
+            {
+                var dir = One("dir") ?? throw new InvalidOperationException("--dir required");
+                var ids = flags.Contains("all") ? null : (One("items") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+                Emit(DoctorDesk.Decide(One("decision") ?? "", ids, LoadPlan(), home, catalogue, Journal(), dir, true), null);
+                break;
+            }
+            case "history":
+                Emit(DoctorDesk.History(DoctorJournal.Read(Journal().Path)), null);
+                break;
+            case "undo-checkup":
+                Emit(DoctorDesk.Undo(One("checkup") ?? throw new InvalidOperationException("--checkup required"), home, catalogue, Journal(), true), null);
+                break;
             case "execute":
             {
                 var j = Journal();
