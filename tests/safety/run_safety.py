@@ -343,7 +343,10 @@ def t_evict_cloud_roundtrip(c, res):
     c.doctor("recover", "--root", home, "--journal", j)
     c.doctor("tier1", "--root", home, "--journal", j)
     local = [p for p in cloud if allocated(p) > 0]
-    assert not local, f"still local after tier1: {local}"
+    if local:
+        recs = [r for r in map(json.loads, open(j, encoding="utf-8")) if r.get("action") == "evictCloud"]
+        why = [(os.path.basename(r.get("from") or ""), r.get("phase"), r.get("reason"), r.get("freedBytes")) for r in recs]
+        raise AssertionError(f"still local after tier1: {[(os.path.basename(p), allocated(p)) for p in local]}; journal: {why}")
     assert allocated(pinned) > 0, "evicted a pinned file"
     c.doctor("undo", "--root", home, "--journal", j)
     local = [p for p in cloud if allocated(p) > 0]
