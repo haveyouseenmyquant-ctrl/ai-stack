@@ -10,6 +10,13 @@ public static class DoctorCloud
 {
     const uint FILE_ATTRIBUTE_PINNED = 0x80000, FILE_ATTRIBUTE_UNPINNED = 0x100000, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000;
 
+    /// By default the cloud filter disguises placeholders as plain files (no reparse attribute, no tag); the doctor
+    /// needs to see them to tell evictable files from links. Process-wide; call once at startup.
+    public static void ExposePlaceholders()
+    {
+        if (OperatingSystem.IsWindows()) try { RtlSetProcessPlaceholderCompatibilityMode(2 /* PHCM_EXPOSE_PLACEHOLDERS */); } catch { }
+    }
+
     /// IO_REPARSE_TAG_CLOUD and its CLOUD_1..F variants (0x9000x01A).
     public static bool IsCloudTag(uint tag) => (tag & 0xFFFF0FFF) == 0x9000001A;
 
@@ -77,6 +84,7 @@ public static class DoctorCloud
     [DllImport("kernel32.dll")] static extern bool FindClose(IntPtr h);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+    [DllImport("ntdll.dll")] static extern sbyte RtlSetProcessPlaceholderCompatibilityMode(sbyte mode);
     [DllImport("cldapi.dll")]
     static extern int CfGetPlaceholderInfo(SafeFileHandle h, int infoClass, byte[] info, int length, out int returned);
     [DllImport("cldapi.dll")]

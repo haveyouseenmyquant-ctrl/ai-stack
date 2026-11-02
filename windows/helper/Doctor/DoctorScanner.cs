@@ -157,7 +157,12 @@ public class DoctorScanner
                     continue;
                 }
                 try { if (!File.GetAttributes(p).HasFlag(FileAttributes.ReparsePoint)) continue; } catch { continue; }
-                if (DoctorCloud.PlaceholderState(p) is not { InSync: true, Pinned: false, Dehydrated: false }) continue;
+                var st = DoctorCloud.PlaceholderState(p);
+                if (st is not { InSync: true, Pinned: false, Dehydrated: false })
+                {
+                    if (st != null) Skipped.Add($"cloud files: {Rel(p)}: kept ({st})");
+                    continue;
+                }
                 var fi = new FileInfo(p);
                 if (AgeDays(fi.LastWriteTimeUtc) < cold) continue;
                 out_.Add(new Hit(p, DoctorFS.Allocated(p), $"synced to the cloud, untouched {AgeDays(fi.LastWriteTimeUtc):F0} days"));
