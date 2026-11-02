@@ -56,7 +56,7 @@ public static class DoctorCli
         var catalogue = DoctorCatalogue.Load(One("catalogue"));
         var checkup = One("checkup") ?? DoctorFS.Iso();
         var archive = (values.GetValueOrDefault("archive") ?? new()).Select(p => Path.IsPathRooted(p) ? p : Path.Combine(home, p)).ToList();
-        if (verb is "tier1" or "checkup" or "decide" or "undo-checkup" or "approve" or "decline" or "rule-add" or "execute" or "undo" or "recover" && root == null)
+        if (verb is "tier1" or "checkup" or "decide" or "undo-checkup" or "approve" or "decline" or "rule-add" or "rule-remove" or "execute" or "undo" or "recover" && root == null)
             throw new InvalidOperationException($"{verb} needs --root <fixture home>; real-profile writes are not enabled");
         if (root != null && !Directory.Exists(home)) throw new InvalidOperationException($"no such root {home}");
 
@@ -127,6 +127,22 @@ public static class DoctorCli
                 var items = plan.Groups.SelectMany(g => g.Items).Where(i => flags.Contains("all") || ids.Contains(i.Id)).ToList();
                 Executor(Journal()).Decline(items, "user");
                 Console.WriteLine($"declined {items.Count}");
+                break;
+            }
+            case "rules":
+            {
+                var dir = One("dir") ?? throw new InvalidOperationException("--dir required");
+                Emit(DoctorRuleBook.Load(Path.Combine(dir, "rules.json"), catalogue), null);
+                break;
+            }
+            case "rule-remove":
+            {
+                var dir = One("dir") ?? throw new InvalidOperationException("--dir required");
+                var id = One("rule") ?? throw new InvalidOperationException("--rule required");
+                var book = DoctorRuleBook.Load(Path.Combine(dir, "rules.json"), catalogue);
+                if (!book.Remove(id)) throw new InvalidOperationException($"no rule {id}");
+                Emit(book, Path.Combine(dir, "rules.json"));
+                Console.WriteLine($"removed {id}");
                 break;
             }
             case "rule-add":

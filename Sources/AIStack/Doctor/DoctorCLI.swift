@@ -64,7 +64,7 @@ enum DoctorCLI {
         let catalogue = try DoctorCatalogue.load(o.one("catalogue"))
         let checkup = o.one("checkup") ?? DoctorFS.iso()
         let archive = (o.values["archive"] ?? []).map { $0.hasPrefix("/") ? $0 : home + "/" + $0 }
-        let writing = ["tier1", "checkup", "decide", "undo-checkup", "approve", "decline", "rule-add", "execute", "undo", "recover"].contains(verb)
+        let writing = ["tier1", "checkup", "decide", "undo-checkup", "approve", "decline", "rule-add", "rule-remove", "execute", "undo", "recover"].contains(verb)
         if writing && root == nil { throw UsageError(description: "\(verb) needs --root <fixture home>; real-home writes are not enabled") }
         if root != nil && !FileManager.default.fileExists(atPath: home) { throw UsageError(description: "no such root \(home)") }
 
@@ -138,6 +138,15 @@ enum DoctorCLI {
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
             try emit(book, dir + "/rules.json")
             try emit(r, nil)
+        case "rules":
+            guard let dir = o.one("dir") else { throw UsageError(description: "--dir required") }
+            try emit(DoctorRuleBook.load(dir + "/rules.json", catalogue: catalogue), nil)
+        case "rule-remove":
+            guard let dir = o.one("dir"), let id = o.one("rule") else { throw UsageError(description: "--dir and --rule required") }
+            var book = DoctorRuleBook.load(dir + "/rules.json", catalogue: catalogue)
+            guard book.remove(id) else { throw UsageError(description: "no rule \(id)") }
+            try emit(book, dir + "/rules.json")
+            print("removed \(id)")
         case "decide":
             guard let dir = o.one("dir"), let d = o.one("decision").flatMap(DoctorDesk.Decision.init(rawValue:))
             else { throw UsageError(description: "--dir and --decision approve|decline|always required") }

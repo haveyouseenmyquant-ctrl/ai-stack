@@ -41,6 +41,9 @@ public class DoctorRuleBook
         return r;
     }
 
+    /// Removing a rule only stops future auto-approvals; what it already did stays in History with its own Undo.
+    public bool Remove(string id) => Rules.RemoveAll(r => r.Id == id) > 0;
+
     public DoctorRule? RuleFor(Finding f) => Rules.FirstOrDefault(r => r.Category == f.Category && f.Action.Ruleable());
 }
 

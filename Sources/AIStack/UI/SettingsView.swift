@@ -5,6 +5,8 @@ struct SettingsView: View {
     @EnvironmentObject var settings: AppSettings
     @State private var claudePathDisplay = ""
     @State private var showDoctorIntro = false
+    @State private var doctorRules: [(rule: DoctorRule, label: String)] = []
+    @State private var doctorRunning = false
 
     private let models = [("haiku", "Haiku — fastest"), ("sonnet", "Sonnet — balanced"), ("opus", "Opus — best quality")]
 
@@ -68,6 +70,12 @@ struct SettingsView: View {
                 }
                 Text("Only on mains power and when the Mac is idle. At most one approval request a day.")
                     .font(.caption).foregroundStyle(.secondary)
+                if settings.doctorEnabled {
+                    HStack {
+                        Button("Check Up Now") { checkUpNow() }.disabled(doctorRunning)
+                        if doctorRunning { ProgressView().controlSize(.small); Text("Checking…").foregroundStyle(.secondary) }
+                    }
+                }
                 Toggle("Free up local copies of synced cloud files", isOn: $settings.doctorEvictCloud)
                 Toggle("Compress cold files in place (they still open normally)", isOn: $settings.doctorCompress)
                 Toggle("Zip folders I mark for archiving", isOn: $settings.doctorArchive)
@@ -85,6 +93,18 @@ struct SettingsView: View {
                 ForEach(Self.doctorThresholdKeys, id: \.key) { t in
                     Stepper(value: thresholdBinding(t.key, t.fallback), in: 7...365, step: t.key == "installerAgeDays" ? 1 : 15) {
                         Text("\(t.label): \(thresholdBinding(t.key, t.fallback).wrappedValue) days")
+                    }
+                }
+                LabeledContent("Always do this (rules)") {
+                    if doctorRules.isEmpty { Text("None").foregroundStyle(.secondary) }
+                }
+                ForEach(doctorRules, id: \.rule.id) { r in
+                    HStack {
+                        Text(r.label)
+                        Text("since " + (DoctorFS.date(r.rule.created)?.formatted(date: .abbreviated, time: .omitted) ?? r.rule.created))
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Remove") { removeDoctorRule(r.rule.id) }
                     }
                 }
                 Toggle("Summarise each checkup with Claude", isOn: $settings.doctorClaudeSummary)
@@ -115,10 +135,39 @@ struct SettingsView: View {
         .sheet(isPresented: $showDoctorIntro) { DoctorIntroView(settings: settings, isPresented: $showDoctorIntro) }
         .frame(minWidth: 520, minHeight: 560)
         .onAppear {
+            loadDoctorRules()
             DispatchQueue.global().async {
                 let path = ClaudeCLI.shared.binaryPath() ?? "Not found"
                 DispatchQueue.main.async { claudePathDisplay = path }
             }
+        }
+    }
+
+    private func loadDoctorRules() {
+        guard let catalogue = try? DoctorCatalogue.load(nil) else { return }
+        let book = DoctorRuleBook.load(DoctorScheduler.checkupsPath + "/rules.json", catalogue: catalogue)
+        doctorRules = book.rules.map { r in (r, catalogue.categories.first { $0.id == r.category }?.label ?? r.category) }
+    }
+
+    /// Removing a rule only stops future auto-approvals; History keeps Undo for what it already did.
+    private func removeDoctorRule(_ id: String) {
+        guard let catalogue = try? DoctorCatalogue.load(nil) else { return }
+        let path = DoctorScheduler.checkupsPath + "/rules.json"
+        var book = DoctorRuleBook.load(path, catalogue: catalogue)
+        if book.remove(id) {
+            do { try DoctorCLI.emit(book, path) } catch { Log.error("Couldn't save Laptop Doctor rules: \(error)", "doctor") }
+        }
+        loadDoctorRules()
+    }
+
+    private func checkUpNow() {
+        guard let doctor = (NSApp.delegate as? AppDelegate)?.doctor else { return }
+        doctor.runNow()
+        doctorRunning = true
+        Task { @MainActor in
+            while doctor.running { try? await Task.sleep(for: .seconds(1)) }
+            doctorRunning = false
+            (NSApp.delegate as? AppDelegate)?.showDoctor()
         }
     }
 

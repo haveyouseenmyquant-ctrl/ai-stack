@@ -224,6 +224,20 @@ function renderSettings() {
   for (const [key, , fallback] of THRESHOLDS) $(`t-${key}`).value = s.thresholds[key] ?? fallback;
 }
 
+async function loadRules() {
+  const { rules } = await host('doctor.rules');
+  $('rules').innerHTML = rules.map((r) => `<div class="entry">
+      <span class="grow">${escape(r.label)} <span class="small muted">· since ${escape(when(r.created))}</span></span>
+      <button class="btn" data-rule="${escape(r.id)}">Remove</button></div>`).join('')
+    || '<div class="small muted">No rules. "Always do this" on a plan group adds one; only Recycle Bin moves and disabling startup items can become rules.</div>';
+}
+
+$('rules').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-rule]');
+  if (!b) return;
+  try { await host('doctor.ruleRemove', { rule: b.dataset.rule }); await loadRules(); } catch (error) { showError(error); }
+});
+
 async function saveSettings(change) {
   ({ settings } = await host('doctor.settings.set', { settings: { ...settings, ...change } }));
   renderSettings();
@@ -254,6 +268,7 @@ function setup() {
     document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
     for (const id of ['report', 'history', 'settings']) $(id).hidden = id !== tab.dataset.tab;
     if (tab.dataset.tab === 'history') loadHistory().catch(showError);
+    if (tab.dataset.tab === 'settings') loadRules().catch(showError);
   }));
 
   chrome.runtime.onMessage.addListener((message) => {

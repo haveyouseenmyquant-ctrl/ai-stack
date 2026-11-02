@@ -247,6 +247,27 @@ public sealed class DoctorService
                 return new JsonObject { ["result"] = Node(res) };
             }
 
+            case "doctor.rules":
+            {
+                var catalogue = DoctorCatalogue.Load(null);
+                var rules = new JsonArray();
+                foreach (var r in DoctorRuleBook.Load(Path.Combine(CheckupsPath, "rules.json"), catalogue).Rules)
+                    rules.Add(new JsonObject { ["id"] = r.Id, ["category"] = r.Category, ["created"] = r.Created,
+                                               ["label"] = catalogue.Categories.FirstOrDefault(c => c.Id == r.Category)?.Label ?? r.Category });
+                return new JsonObject { ["rules"] = rules };
+            }
+
+            case "doctor.ruleRemove":
+            {
+                RequireWrites();
+                var path = Path.Combine(CheckupsPath, "rules.json");
+                var book = DoctorRuleBook.Load(path, DoctorCatalogue.Load(null));
+                if (!book.Remove(Str(m, "rule"))) throw new InvalidOperationException("no such rule");
+                Directory.CreateDirectory(CheckupsPath);
+                File.WriteAllText(path, JsonSerializer.Serialize(book, DoctorFS.Json));
+                return new JsonObject { ["removed"] = Str(m, "rule") };
+            }
+
             case "doctor.history":
                 return new JsonObject { ["history"] = Node(DoctorDesk.History(DoctorJournal.Read(JournalPath))) };
 

@@ -287,3 +287,10 @@ Meeting Notes on Windows lives in the Chrome extension (popup, side panel and th
 - **`windows/helper/Doctor/DoctorService.cs`** answers `doctor.*` requests and does all decisions through `DoctorDesk`, as the CLI does. Settings live in `%LOCALAPPDATA%\AIStack\data\Doctor\settings.json`. Thresholds are allow-listed and clamped to ≥ 7. Switching on sets `lastRun` so the first checkup waits for the next slot. Checkup ids that look like paths are refused.
 - **Schedule**: the host lives while Chrome runs (the extension keeps the port open). A 10-minute timer runs a due checkup only on mains power (`GetSystemPowerStatus`) and after 5 idle minutes (`GetLastInputInfo`). It emits `doctor-checkup`, and the service worker shows at most one notification a day that opens `doctor.html#<checkup>`.
 - **Test hook**: `AISTACK_DOCTOR_HOME` points every write at a fixture home, and `AISTACK_DOCTOR_DATA` moves the support folder. Off Windows, without a fixture home, every writing request is refused. `t_extension_page_drives_host` (Windows suite) speaks the native-messaging framing to `--host` and checks settings sanitising, a switched-off checkup that changes no file, approve-once, the refused path-like id, and undo of the checkup.
+
+## 21. Rules list and "Check up now" (session 17, 2026-11-02)
+
+- Settings lists the "always do this" rules (category label and date) with **Remove** on both platforms: macOS `SettingsView` reads `rules.json` through `DoctorRuleBook.load` (so forged rules never show), Windows `doctor.html` asks `doctor.rules` / `doctor.ruleRemove`. CLI verbs `rules` and `rule-remove` (the latter needs `--root`).
+- Removing a rule only stops later auto-approvals. What it already did stays in History with its own Undo.
+- macOS Settings gets **Check Up Now** (shown while the Doctor is on). It runs `DoctorScheduler.runNow()` and opens the report window when done. Windows already had it on the Report tab.
+- Tests: `t_plans_carry_over_and_rules` removes the rule and checks the next checkup runs nothing by rule; `t_extension_page_drives_host` checks the list hides forged rules and Remove works.

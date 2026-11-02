@@ -36,6 +36,14 @@ struct DoctorRuleBook: Codable {
         return r
     }
 
+    /// Removing a rule only stops future auto-approvals; what it already did stays in History with its own Undo.
+    @discardableResult
+    mutating func remove(_ id: String) -> Bool {
+        let n = rules.count
+        rules.removeAll { $0.id == id }
+        return rules.count < n
+    }
+
     func rule(for f: Finding) -> DoctorRule? { rules.first { $0.category == f.category && f.action.ruleable } }
 }
 

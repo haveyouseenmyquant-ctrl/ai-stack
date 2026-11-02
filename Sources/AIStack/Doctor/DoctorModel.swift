@@ -153,4 +153,10 @@ enum DoctorFS {
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f.string(from: d)
     }
+
+    static func date(_ iso: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.date(from: iso)
+    }
 }

@@ -595,6 +595,16 @@ def t_plans_carry_over_and_rules(c, res):
     assert not touched, f"rule run touched {touched}"
     c.doctor("undo", "--root", home, "--journal", j)
     assert not diff(before, snapshot(home, skip_trash=True), "hash"), "undo did not restore the ruled Trash moves"
+    # Removing a rule (Settings) stops later auto-approvals; an unknown id is refused; forged rules aren't listed.
+    listed = json.loads(c.doctor("rules", "--root", home, "--dir", d).stdout)["rules"]
+    assert [r["category"] for r in listed] == ["cache"], f"rules list shows {listed}"
+    assert c.doctor("rule-remove", "--root", home, "--dir", d, "--rule", "r-nope", check=False).returncode != 0, "removed an unknown rule"
+    c.doctor("rule-remove", "--root", home, "--dir", d, "--rule", listed[0]["id"])
+    assert not json.loads(c.doctor("rules", "--root", home, "--dir", d).stdout)["rules"], "rule still listed after removal"
+    n_rule = sum(1 for l in open(j) if '"rule:' in l)
+    r6, _ = checkup()
+    assert not (r6.get("ruled") or {}).get("done"), f"a removed rule still ran: {r6}"
+    assert sum(1 for l in open(j) if '"rule:' in l) == n_rule, "a removed rule recorded new approvals"
 
 
 def t_report_window_decisions(c, res):
@@ -705,6 +715,14 @@ def t_extension_page_drives_host(c, res):
         assert len(hist) == len(cache) and all(e["canUndo"] for e in hist), f"history: {hist}"
         assert h.call("doctor.undoCheckup", checkup=cid)["ok"], "undo failed"
         assert not diff(before, snapshot(home, skip_trash=True), "hash"), "undo of the checkup did not restore everything"
+        # Settings' rules list: shows what "always" added (forged lossy rules filtered out); Remove takes it away.
+        assert not h.call("doctor.rules")["rules"], "rules not empty at start"
+        rp = os.path.join(data, "Checkups", "rules.json")
+        json.dump({"version": 1, "rules": [{"id": "r-ok", "category": "cache", "created": "x"},
+                                           {"id": "r-forged", "category": "trash", "created": "x"}]}, open(rp, "w"))
+        assert [r["id"] for r in h.call("doctor.rules")["rules"]] == ["r-ok"], "a forged rule was listed"
+        assert not h.call("doctor.ruleRemove", rule="r-nope")["ok"], "removed an unknown rule"
+        assert h.call("doctor.ruleRemove", rule="r-ok")["ok"] and not h.call("doctor.rules")["rules"], "rule not removed"
     finally:
         h.close()
     c.journals.append(os.path.join(data, "journal.jsonl"))
