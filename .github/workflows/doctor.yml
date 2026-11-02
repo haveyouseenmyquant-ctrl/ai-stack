@@ -21,6 +21,12 @@ jobs:
           etc="$(brew --prefix)/etc/clamav"
           sed -e 's/^Example/#Example/' "$etc/freshclam.conf.sample" > "$etc/freshclam.conf"
           mkdir -p "$(brew --prefix)/var/lib/clamav"
+          # ClamAV 1.5 verifies the .cvd.sign files with the certs it ships; freshclam's "NULL X509 store" means it
+          # can't find them, so point CVD_CERTS_DIR (read by freshclam and clamscan) at the bottle's copy.
+          clamscan --version
+          certs="$(find "$(brew --prefix clamav)/" "$(brew --prefix)/etc/clamav" -name '*.crt' 2>/dev/null | head -1)"
+          echo "ClamAV certs: ${certs:-none found}"
+          [ -n "$certs" ] && echo "CVD_CERTS_DIR=$(dirname "$certs")" >> "$GITHUB_ENV"
       - name: Restore ClamAV signatures
         uses: actions/cache/restore@v4
         with:

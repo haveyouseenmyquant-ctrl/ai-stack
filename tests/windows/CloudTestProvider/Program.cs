@@ -4,6 +4,7 @@
 //
 // Copies every file under <syncRoot> to <serverDir> (the "cloud"), registers <syncRoot> as a sync root, converts
 // the files into in-sync placeholders, then serves downloads (FETCH_DATA) from <serverDir> until it is killed.
+// Like OneDrive, it frees the local bytes of any file someone marks unpinned (attrib +U), in its own process.
 // Prints "ready" once serving, or "unsupported: <why>" and exits 3 if the machine can't host a sync root.
 using System.Runtime.InteropServices;
 using System.Text;
@@ -37,7 +38,7 @@ static class Program
         }
         Console.WriteLine("ready");
         Console.Out.Flush();
-        Thread.Sleep(Timeout.Infinite);
+        WatchUnpinned();
         return 0;
     }
 
@@ -133,6 +134,82 @@ static class Program
         }
         finally { buf.Free(); Marshal.FreeHGlobal(op); Marshal.FreeHGlobal(par); }
     }
+
+    const uint UNPINNED = 0x100000, RECALL_ON_DATA_ACCESS = 0x400000;
+
+    /// Every 200 ms: dehydrate files that are unpinned and still hold local data. Diagnostics go to stderr (CI log).
+    static void WatchUnpinned()
+    {
+        var handled = new HashSet<string>();   // tried since it was last unpinned (placeholder bits may be hidden from us)
+        while (true)
+        {
+            foreach (var f in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            {
+                uint a;
+                try { a = (uint)File.GetAttributes(f); } catch { continue; }
+                if ((a & UNPINNED) == 0) { handled.Remove(f); continue; }
+                if ((a & RECALL_ON_DATA_ACCESS) != 0 || !handled.Add(f)) continue;
+                var t0 = DateTime.UtcNow;
+                var how = DehydrateHere(f);
+                Console.Error.WriteLine($"cloud provider: dehydrate {Path.GetFileName(f)}: {how} " +
+                                        $"({(DateTime.UtcNow - t0).TotalMilliseconds:F0} ms, attrs 0x{(uint)File.GetAttributes(f):X})");
+            }
+            Thread.Sleep(200);
+        }
+    }
+
+    /// Provider-side dehydration: CfUpdatePlaceholder(DEHYDRATE) on an exclusive oplock handle, as the docs ask;
+    /// if that fails or takes over 15 s, CfDehydratePlaceholder on a plain handle.
+    static string DehydrateHere(string f)
+    {
+        var notes = new List<string>();
+        var a = Bounded(() =>
+        {
+            var hr = CfOpenFileWithOplock(f, 1 | 2 /* EXCLUSIVE | WRITE_ACCESS */, out var ph);
+            if (hr < 0) return hr;
+            try
+            {
+                if (!CfReferenceProtectedHandle(ph)) return unchecked((int)0x80070006);
+                try
+                {
+                    var h = CfGetWin32HandleFromProtectedHandle(ph);
+                    return CfUpdatePlaceholder(h, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero, 0, 4 /* CF_UPDATE_FLAG_DEHYDRATE */,
+                                               IntPtr.Zero, IntPtr.Zero);
+                }
+                finally { CfReleaseProtectedHandle(ph); }
+            }
+            finally { CfCloseHandle(ph); }
+        });
+        if (a == 0) return "ok (CfUpdatePlaceholder)";
+        notes.Add(a == null ? "CfUpdatePlaceholder timed out" : $"CfUpdatePlaceholder 0x{a:X8}");
+        var b = Bounded(() =>
+        {
+            using var h = CreateFileW(f, 0x80 | 0x100 | 0x2, 0, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+            if (h.IsInvalid) return unchecked((int)(0x80070000 | (uint)Marshal.GetLastWin32Error()));
+            return CfDehydratePlaceholder(h, 0, -1, 0, IntPtr.Zero);
+        });
+        if (b == 0) return "ok (CfDehydratePlaceholder) after " + string.Join("; ", notes);
+        notes.Add(b == null ? "CfDehydratePlaceholder timed out" : $"CfDehydratePlaceholder 0x{b:X8}");
+        return "failed: " + string.Join("; ", notes);
+    }
+
+    static int? Bounded(Func<int> call)
+    {
+        var t = Task.Run(call);
+        return t.Wait(15000) ? t.Result : null;
+    }
+
+    [DllImport("cldapi.dll", CharSet = CharSet.Unicode)]
+    static extern int CfOpenFileWithOplock(string path, int flags, out IntPtr protectedHandle);
+    [DllImport("cldapi.dll")] static extern bool CfReferenceProtectedHandle(IntPtr ph);
+    [DllImport("cldapi.dll")] static extern void CfReleaseProtectedHandle(IntPtr ph);
+    [DllImport("cldapi.dll")] static extern IntPtr CfGetWin32HandleFromProtectedHandle(IntPtr ph);
+    [DllImport("cldapi.dll")] static extern void CfCloseHandle(IntPtr ph);
+    [DllImport("cldapi.dll")]
+    static extern int CfUpdatePlaceholder(IntPtr h, IntPtr fsMetadata, IntPtr identity, int identityLength, IntPtr ranges,
+                                          int rangeCount, int flags, IntPtr usn, IntPtr overlapped);
+    [DllImport("cldapi.dll")]
+    static extern int CfDehydratePlaceholder(SafeFileHandle h, long offset, long length, int flags, IntPtr overlapped);
 
     [DllImport("cldapi.dll", CharSet = CharSet.Unicode)]
     static extern int CfRegisterSyncRoot(string path, ref Registration reg, ref Policies pol, int flags);

@@ -118,7 +118,7 @@ public class DoctorExecutor
         return ("done", freed);
     }
 
-    /// Frees the local copy of an in-sync cloud placeholder. One call, and either state is lossless: the provider
+    /// Frees the local copy of an in-sync cloud placeholder (unpin it; the provider frees it). Either state is lossless: the provider
     /// holds the bytes, so a crash leaves the file local or evicted, never missing. Undo downloads it again.
     bool cloudStuck;
 
@@ -127,7 +127,7 @@ public class DoctorExecutor
         var path = f.Path;
         if (guardian.Refusal(path) is string why) { Log(f, "refused", why); return ("refused", 0); }
         if (!OperatingSystem.IsWindows()) { Log(f, "skipped", "cloud eviction needs Windows"); return ("skipped", 0); }
-        if (cloudStuck) { Log(f, "skipped", "an earlier cloud eviction is stuck"); return ("skipped", 0); }
+        if (cloudStuck) { Log(f, "skipped", "the cloud provider did not free an earlier file"); return ("skipped", 0); }
         if (DoctorCloud.PlaceholderState(path) is not { InSync: true, Pinned: false, Dehydrated: false })
         { Log(f, "skipped", "not an in-sync, unpinned, local cloud file any more"); return ("skipped", 0); }
         var before = State(path);
@@ -141,9 +141,10 @@ public class DoctorExecutor
         CrashPoint("evict-intent");
         try
         {
-            if (!DoctorCloud.Dehydrate(path))
-            {   // Left at `intent`: the next run's recover records it as done or failed from what is on disk.
-                Log(f, "skipped", "cloud eviction still running after 60 s; recover will settle it");
+            if (!DoctorCloud.Dehydrate(path, before.Mode))
+            {   // Attributes put back, file still local: nothing changed.
+                var nf = rec.Copy(); nf.Phase = "failed"; nf.Reason = "the cloud provider did not free the file within 20 s"; nf.Ts = DoctorFS.Iso();
+                journal.Append(nf);
                 cloudStuck = true;
                 return ("skipped", 0);
             }
@@ -168,6 +169,7 @@ public class DoctorExecutor
         AppendUndo(r, "undo-intent", null);
         try
         {
+            DoctorCloud.RestorePin(path, before.Mode);   // clear UNPINNED first, or the provider frees it again
             DoctorCloud.Hydrate(path);
             var s = State(path);
             if (s == null || s.Sha256 != before.Sha256) throw new IOException("verify: bytes differ after download");
@@ -487,11 +489,13 @@ public class DoctorExecutor
         return n;
     }
 
-    /// Eviction is one call, so an interrupted one is either evicted (record it as done, so Undo can download it)
+    /// The provider frees the file, so an interrupted eviction is either evicted (record it as done, so Undo can download it)
     /// or still local (failed). An interrupted download just stays evicted; Undo can be run again.
     void RecoverEvict(JournalRecord r)
     {
         var e = r.Copy(); e.Ts = DoctorFS.Iso(); e.Reason = "interrupted; recovered";
+        if (r.Phase == "intent" && r.From is string q && r.Before is FileState b && File.Exists(q))
+            try { DoctorCloud.RestorePin(q, b.Mode); } catch { }   // first, so the provider can't free it after we look
         var evicted = r.From is string p && DoctorCloud.PlaceholderState(p) is { Dehydrated: true };
         e.Phase = r.Phase == "intent" ? (evicted ? "done" : "failed") : (evicted ? "undo-failed" : "undo-done");
         journal.Append(e);

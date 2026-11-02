@@ -8,7 +8,7 @@ namespace AIStack.Doctor;
 /// and opening or hydrating the file downloads it again.
 public static class DoctorCloud
 {
-    const uint FILE_ATTRIBUTE_PINNED = 0x80000, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000;
+    const uint FILE_ATTRIBUTE_PINNED = 0x80000, FILE_ATTRIBUTE_UNPINNED = 0x100000, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000;
 
     /// IO_REPARSE_TAG_CLOUD and its CLOUD_1..F variants (0x9000x01A).
     public static bool IsCloudTag(uint tag) => (tag & 0xFFFF0FFF) == 0x9000001A;
@@ -50,20 +50,37 @@ public static class DoctorCloud
         return new State(inSync == 1, pin == 1 /* CF_PIN_STATE_PINNED */ || (attrs & FILE_ATTRIBUTE_PINNED) != 0, dehydrated);
     }
 
-    /// Frees the local bytes, through a share-all attributes-only handle: the cloud filter opens the file itself to
-    /// purge the data, so any share-none handle of ours (plain CreateFile, or CfOpenFileWithOplock's EXCLUSIVE) made
-    /// CfDehydratePlaceholder wait forever on Windows CI. Files open elsewhere were ruled out by the caller, and the
-    /// filter itself refuses to purge a file another process has open. Bounded anyway: false = still running after
-    /// `timeoutSec`; the file is then either local or evicted (both lossless) and the journal's recover settles it.
-    public static bool Dehydrate(string path, int timeoutSec = 60)
+    /// Frees the local bytes the way Explorer's "Free up space" does: set FILE_ATTRIBUTE_UNPINNED (and clear PINNED),
+    /// and the provider (OneDrive, Google Drive, ...) dehydrates the file itself. Calling CfDehydratePlaceholder from
+    /// our own process waited forever on Windows CI with every handle mode tried (DESIGN §14). Waits up to `timeoutSec`
+    /// for the bytes to go; if the provider doesn't act by then the attributes are put back and false is returned.
+    /// Every state on the way is lossless: the provider holds the bytes, the file is local or a placeholder.
+    public static bool Dehydrate(string path, int originalAttrs, int timeoutSec = 20)
     {
-        var h = Open(path, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, share: 7);
-        if (h.IsInvalid) throw new IOException($"open: {Marshal.GetLastWin32Error()}");
-        var work = Task.Run(() => CfDehydratePlaceholder(h, 0, -1, 0, IntPtr.Zero));
-        if (!work.Wait(timeoutSec * 1000)) return false;   // the handle leaks with the stuck call; the process exits soon
-        h.Dispose();
-        Check(work.Result, "CfDehydratePlaceholder");
-        return true;
+        var now = (uint)File.GetAttributes(path) & Settable;
+        File.SetAttributes(path, (FileAttributes)((now & ~FILE_ATTRIBUTE_PINNED) | FILE_ATTRIBUTE_UNPINNED));
+        var until = DateTime.UtcNow.AddSeconds(timeoutSec);
+        while (DateTime.UtcNow < until)
+        {
+            if (PlaceholderState(path) is { Dehydrated: true }) return true;
+            Thread.Sleep(200);
+        }
+        RestorePin(path, originalAttrs);
+        return PlaceholderState(path) is { Dehydrated: true };   // the provider may have acted just now
+    }
+
+    /// The bits SetFileAttributes accepts (read-only, hidden, system, archive, normal, temporary, offline,
+    /// not-indexed, pinned, unpinned); the placeholder's own bits (reparse, sparse, recall) are the filter's.
+    const uint Settable = 0x1 | 0x2 | 0x4 | 0x20 | 0x80 | 0x100 | 0x1000 | 0x2000 | FILE_ATTRIBUTE_PINNED | FILE_ATTRIBUTE_UNPINNED;
+
+    /// Puts the pin attributes back to what they were before Dehydrate (clears UNPINNED), so the provider won't free
+    /// the file again after Undo downloads it. Only the two pin bits change; times are not touched.
+    public static void RestorePin(string path, int originalAttrs)
+    {
+        var now = (uint)File.GetAttributes(path) & Settable;
+        var pins = FILE_ATTRIBUTE_PINNED | FILE_ATTRIBUTE_UNPINNED;
+        var want = (now & ~pins) | ((uint)originalAttrs & pins);
+        if (want != now) File.SetAttributes(path, (FileAttributes)want);
     }
 
     static void Check(int hr, string what) { if (hr < 0) throw new IOException($"{what}: 0x{hr:X8}"); }
@@ -101,8 +118,6 @@ public static class DoctorCloud
     static extern int CfGetSyncRootInfoByPath(string path, int infoClass, byte[] info, int length, out int returned);
     [DllImport("cldapi.dll")]
     static extern int CfGetPlaceholderInfo(SafeFileHandle h, int infoClass, byte[] info, int length, out int returned);
-    [DllImport("cldapi.dll")]
-    static extern int CfDehydratePlaceholder(SafeFileHandle h, long offset, long length, int flags, IntPtr overlapped);
     [DllImport("cldapi.dll")]
     static extern int CfHydratePlaceholder(SafeFileHandle h, long offset, long length, int flags, IntPtr overlapped);
 }
