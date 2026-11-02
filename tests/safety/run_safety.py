@@ -45,6 +45,10 @@ class Ctx:
             print("cloud provider:", line or f"exited {pr.wait()}")
             return False
         self.providers.append(pr)
+        if self.n == 1:   # what the file system says about one placeholder (CI log)
+            f = glob.glob(os.path.join(cloud, "*", "*"))[0]
+            print("cloud provider:", f, hex(os.lstat(f).st_file_attributes), hex(getattr(os.lstat(f), "st_reparse_tag", 0)),
+                  subprocess.run(["fsutil", "reparsepoint", "query", f], capture_output=True, text=True).stdout[:300])
         return True
 
     def doctor(self, verb, *args, check=True, env=None):

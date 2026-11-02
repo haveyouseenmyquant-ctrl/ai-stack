@@ -157,10 +157,12 @@ public class DoctorScanner
                     continue;
                 }
                 try { if (!File.GetAttributes(p).HasFlag(FileAttributes.ReparsePoint)) continue; } catch { continue; }
+                if (!DoctorCloud.IsCloudTag(DoctorCloud.ReparseTag(p)))
+                { Skipped.Add($"cloud files: {Rel(p)}: reparse point 0x{DoctorCloud.ReparseTag(p):X8} is not a cloud file"); continue; }
                 var st = DoctorCloud.PlaceholderState(p);
                 if (st is not { InSync: true, Pinned: false, Dehydrated: false })
                 {
-                    if (st != null) Skipped.Add($"cloud files: {Rel(p)}: kept ({st})");
+                    Skipped.Add($"cloud files: {Rel(p)}: kept ({st?.ToString() ?? "placeholder info unreadable"})");
                     continue;
                 }
                 var fi = new FileInfo(p);

@@ -14,7 +14,9 @@ public static class DoctorCloud
     /// needs to see them to tell evictable files from links. Process-wide; call once at startup.
     public static void ExposePlaceholders()
     {
-        if (OperatingSystem.IsWindows()) try { RtlSetProcessPlaceholderCompatibilityMode(2 /* PHCM_EXPOSE_PLACEHOLDERS */); } catch { }
+        if (!OperatingSystem.IsWindows()) return;
+        try { RtlSetProcessPlaceholderCompatibilityMode(2 /* PHCM_EXPOSE_PLACEHOLDERS */); } catch { }
+        try { RtlSetThreadPlaceholderCompatibilityMode(2); } catch { }
     }
 
     /// IO_REPARSE_TAG_CLOUD and its CLOUD_1..F variants (0x9000x01A).
@@ -85,6 +87,7 @@ public static class DoctorCloud
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
     [DllImport("ntdll.dll")] static extern sbyte RtlSetProcessPlaceholderCompatibilityMode(sbyte mode);
+    [DllImport("ntdll.dll")] static extern sbyte RtlSetThreadPlaceholderCompatibilityMode(sbyte mode);
     [DllImport("cldapi.dll")]
     static extern int CfGetPlaceholderInfo(SafeFileHandle h, int infoClass, byte[] info, int length, out int returned);
     [DllImport("cldapi.dll")]
