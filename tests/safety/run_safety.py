@@ -597,6 +597,53 @@ def t_plans_carry_over_and_rules(c, res):
     assert not diff(before, snapshot(home, skip_trash=True), "hash"), "undo did not restore the ruled Trash moves"
 
 
+def t_report_window_decisions(c, res):
+    """The report window's buttons (decide/history/undo-checkup): "always" is refused as a whole for lossy kinds;
+    decline touches nothing; approve runs only the chosen items, once; decided items leave pending; History undoes."""
+    home, exp, j, out = c.fixture()
+    d = os.path.join(out, "checkups")
+    r = json.loads(c.doctor("checkup", "--root", home, "--journal", j, "--dir", d, "--tier1").stdout)
+    plan = os.path.join(r["folder"], "plan.json")
+    p = load(plan)
+    def cat(name):
+        return [i["id"] for i in items(p) if i["category"] == name]
+    def decide(decision, ids, check=True):
+        return c.doctor("decide", "--root", home, "--journal", j, "--dir", d, "--plan", plan, "--decision", decision,
+                        "--items", ",".join(ids), check=check)
+    def journal():
+        return [json.loads(l) for l in open(j)]
+    before = snapshot(home, skip_trash=True)
+    n = len(journal())
+    mixed = cat("trash") + cat("cache")
+    assert cat("trash") and cat("cache"), "fixture lacks trash or cache items"
+    assert decide("always", mixed, check=False).returncode != 0, "always accepted a group with emptying the Trash"
+    assert len(journal()) == n and not os.path.exists(os.path.join(d, "rules.json")), "a refused 'always' still recorded something"
+    dup = cat("duplicate")[0]
+    decide("decline", [dup])
+    assert not diff(before, snapshot(home, skip_trash=True), "hash"), "decline touched files"
+    cache = cat("cache")
+    o = json.loads(decide("approve", cache).stdout)
+    assert o["outcome"]["done"] == len(cache) and o["decided"] == len(cache), f"approve did not run exactly the chosen items: {o}"
+    moved = set(diff(before, snapshot(home, skip_trash=True), "hash"))
+    paths = {os.path.relpath(i["path"], home).replace(os.sep, "/") for i in items(p) if i["id"] in cache}
+    assert moved and all(any(m == q or m.startswith(q + "/") for q in paths) for m in moved), f"approve moved other files: {moved - paths}"
+    assert json.loads(decide("approve", cache).stdout)["decided"] == 0, "approving twice ran again"
+    pend = {e["item"]["id"] for e in load(os.path.join(d, "pending.json"))["items"]}
+    assert not pend & (set(cache) | {dup}), "decided items still pending"
+    inst = cat("downloads-installer")
+    o = json.loads(decide("always", inst).stdout)
+    assert o["rules"] and o["outcome"]["done"] == len(inst), f"always did not add a rule and run: {o}"
+    assert [x["category"] for x in load(os.path.join(d, "rules.json"))["rules"]] == ["downloads-installer"], "wrong rules"
+    h = json.loads(c.doctor("history", "--journal", j).stdout)
+    entries = [e for hc in h for e in hc["entries"] if hc["checkup"] == p["checkup"]]
+    assert len(entries) == len(cache) + len(inst) and all(e["canUndo"] for e in entries), "History lists the wrong entries"
+    assert all(e["by"] == "user" for e in entries), "History entries lack the user's approval"
+    c.doctor("undo-checkup", "--root", home, "--journal", j, "--checkup", p["checkup"])
+    assert not diff(before, snapshot(home, skip_trash=True), "hash"), "undo of the checkup did not restore everything"
+    h = json.loads(c.doctor("history", "--journal", j).stdout)
+    assert all(e["undone"] and not e["canUndo"] for hc in h for e in hc["entries"] if hc["checkup"] == p["checkup"]), "undone entries still undoable"
+
+
 def t_schedule_once_per_slot(c, res):
     """Weekly slot Sunday 11:00 UTC (2026-11-01 is a Sunday); at most one approval request a day."""
     def due(now, last=None, notified=None):
@@ -654,7 +701,7 @@ SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_arch
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
           t_writes_need_root, t_summary_sends_no_user_names, t_checkup_respects_switches, t_schedule_once_per_slot,
-          t_plans_carry_over_and_rules] + ([t_evict_cloud_roundtrip] if WINDOWS else [])
+          t_plans_carry_over_and_rules] + ([t_evict_cloud_roundtrip] if WINDOWS else [t_report_window_decisions])
 
 
 def main():

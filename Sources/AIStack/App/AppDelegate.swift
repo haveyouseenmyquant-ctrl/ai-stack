@@ -104,6 +104,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
     }
 
+    private var doctorDesk: DoctorDeskModel?
+
+    /// The Laptop Doctor window: summary, treatment plan and History. `folder` selects a checkup (from its notification).
+    func showDoctor(folder: String? = nil) {
+        let model = doctorDesk ?? DoctorDeskModel()
+        doctorDesk = model
+        model.reload(select: folder)
+        WindowManager.shared.show(id: "doctor", title: "Laptop Doctor", size: CGSize(width: 760, height: 640),
+                                  minSize: CGSize(width: 640, height: 480)) {
+            DoctorWindowView(model: model).environmentObject(settings)
+        }
+    }
+
     func showSetup() {
         WindowManager.shared.show(id: "setup", title: "Welcome to AI Stack", size: CGSize(width: 600, height: 700)) {
             SetupView().environmentObject(settings)
@@ -200,6 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
         menu.addItem(.separator())
         menu.addItem(item("Setup & Permissions…", #selector(openSetup)))
+        if settings.doctorEnabled { menu.addItem(item("Laptop Doctor…", #selector(openDoctor))) }
         menu.addItem(item("Settings…", #selector(openSettings), key: ","))
         menu.addItem(item("Open Notes Folder", #selector(openNotesFolder)))
         menu.addItem(.separator())
@@ -232,6 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     @objc private func openNotesWindow() { showNotes() }
     @objc private func openSettings() { showSettings() }
     @objc private func openSetup() { showSetup() }
+    @objc private func openDoctor() { showDoctor() }
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func chooseLanguage(_ sender: NSMenuItem) {
@@ -307,8 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         await MainActor.run {
             switch (category, action) {
             case (Notifier.Category.doctorPlan, _):
-                // Until the report window lands: show the checkup's report and plan files.
-                if let doctorFolder { NSWorkspace.shared.open(URL(fileURLWithPath: doctorFolder, isDirectory: true)) }
+                self.showDoctor(folder: doctorFolder)
             case (Notifier.Category.detected, Notifier.Action.start),
                  (Notifier.Category.detected, UNNotificationDefaultActionIdentifier):
                 self.detector.startPending()

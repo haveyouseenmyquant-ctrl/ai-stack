@@ -8,6 +8,11 @@ import Foundation
 ///     AIStack --doctor approve --plan plan.json --journal <file> [--items id,id | --all] [--by user|rule:<id>]
 ///     AIStack --doctor decline --plan plan.json --journal <file> [--items id,id | --all]
 ///     AIStack --doctor rule-add --root <home> --dir <checkups dir> --category <id>   ("always do this"; ruleable kinds only)
+///     AIStack --doctor decide  --root <home> --journal <file> --dir <checkups dir> --plan plan.json --decision approve|decline|always
+///                              [--items id,id | --all]   (what the report window's buttons do)
+///     AIStack --doctor history --journal <file>
+///     AIStack --doctor undo-checkup --root <home> --journal <file> --checkup <id>
+///     AIStack --doctor render  --root <home> --journal <file> --dir <checkups dir> --out x.png [--tab history] [--expand]
 ///     AIStack --doctor execute --root <home> --plan plan.json --journal <file>
 ///     AIStack --doctor undo    --root <home> --journal <file> [--entry <id>]
 ///     AIStack --doctor recover --root <home> --journal <file>
@@ -59,7 +64,7 @@ enum DoctorCLI {
         let catalogue = try DoctorCatalogue.load(o.one("catalogue"))
         let checkup = o.one("checkup") ?? DoctorFS.iso()
         let archive = (o.values["archive"] ?? []).map { $0.hasPrefix("/") ? $0 : home + "/" + $0 }
-        let writing = ["tier1", "checkup", "approve", "decline", "rule-add", "execute", "undo", "recover"].contains(verb)
+        let writing = ["tier1", "checkup", "decide", "undo-checkup", "approve", "decline", "rule-add", "execute", "undo", "recover"].contains(verb)
         if writing && root == nil { throw UsageError(description: "\(verb) needs --root <fixture home>; real-home writes are not enabled") }
         if root != nil && !FileManager.default.fileExists(atPath: home) { throw UsageError(description: "no such root \(home)") }
 
@@ -133,6 +138,24 @@ enum DoctorCLI {
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
             try emit(book, dir + "/rules.json")
             try emit(r, nil)
+        case "decide":
+            guard let dir = o.one("dir"), let d = o.one("decision").flatMap(DoctorDesk.Decision.init(rawValue:))
+            else { throw UsageError(description: "--dir and --decision approve|decline|always required") }
+            let ids: Set<String>? = o.flags.contains("all") ? nil : Set((o.one("items") ?? "").split(separator: ",").map(String.init))
+            try emit(DoctorDesk.decide(d, ids: ids, plan: try loadPlan(), home: home, catalogue: catalogue, journal: try journal(),
+                                       dir: dir, testRoot: true), nil)
+        case "history":
+            try emit(DoctorDesk.history(DoctorJournal.read(try journal().path)), nil)
+        case "undo-checkup":
+            guard let c = o.one("checkup") else { throw UsageError(description: "--checkup <id> required") }
+            try emit(DoctorDesk.undo(checkup: c, home: home, catalogue: catalogue, journal: try journal(), testRoot: true), nil)
+        case "render":
+            guard root != nil, let dir = o.one("dir"), let out = o.one("out") else { throw UsageError(description: "--root, --dir and --out required") }
+            let j = try journal().path
+            try MainActor.assumeIsolated {
+                try DoctorSnapshot.render(home: home, dir: dir, journal: j, tab: o.one("tab") == "history" ? 1 : 0,
+                                          expandFirst: o.flags.contains("expand"), out: out)
+            }
         case "execute":
             let j = try journal()
             try emit(executor(j).execute(try loadPlan(), approvals: DoctorJournal.read(j.path)), nil)
