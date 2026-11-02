@@ -41,8 +41,11 @@ public static class DoctorCheckup
         var rules = DoctorRuleBook.Load(Path.Combine(dir, "rules.json"), catalogue);
         var ruledItems = new List<Finding>();
         var left = new List<Finding>();
+        // Rules act only on what this checkup's own scan found; an entry only carried over from pending.json (which
+        // anything able to write the support folder could edit) goes on the plan for the user instead.
+        var confirmed = findings.Select(f => f.Id).ToHashSet();
         foreach (var f in merged.Items)
-            if (rules.RuleFor(f) is { } r) { ruledItems.Add(f); ex.Approve(new() { f }, "rule:" + r.Id); } else left.Add(f);
+            if (confirmed.Contains(f.Id) && rules.RuleFor(f) is { } r) { ruledItems.Add(f); ex.Approve(new() { f }, "rule:" + r.Id); } else left.Add(f);
         DoctorExecutor.Outcome? ruled = null;
         if (ruledItems.Count > 0)
             ruled = ex.Execute(DoctorCli.MakePlan(ruledItems, catalogue, checkup, home),

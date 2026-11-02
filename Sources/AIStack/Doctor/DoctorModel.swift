@@ -86,6 +86,26 @@ struct TreatmentPlan: Codable {
 }
 
 enum DoctorFS {
+    /// rename(2) that fails with EEXIST instead of replacing: moves into the Trash and back out (undo, recovery)
+    /// must never overwrite something that appeared at the destination after it was checked.
+    @discardableResult
+    static func renameNoReplace(_ from: String, _ to: String) -> Int32 {
+        renamex_np(from, to, UInt32(RENAME_EXCL))
+    }
+
+    /// A fixture root must not be the real home or a folder above it: `--root ~` would run Tier 1 and Tier 2 on
+    /// real data under test-mode rules. Compared after resolving symlinks, ignoring letter case.
+    static func coversRealHome(_ root: String) -> Bool {
+        func norm(_ p: String) -> String {
+            let r = (p as NSString).resolvingSymlinksInPath.lowercased()
+            return r.hasSuffix("/") ? r : r + "/"
+        }
+        var homes = [NSHomeDirectory(), FileManager.default.homeDirectoryForCurrentUser.path]
+        if let pw = getpwuid(getuid()), let d = pw.pointee.pw_dir { homes.append(String(cString: d)) }
+        let r = norm(root)
+        return homes.contains { norm($0).hasPrefix(r) }
+    }
+
     static func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }

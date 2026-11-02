@@ -31,7 +31,9 @@ public sealed class DoctorService
 {
     readonly Func<JsonObject, Task> emit;
     readonly object gate = new();
-    readonly string? fixtureHome = Environment.GetEnvironmentVariable("AISTACK_DOCTOR_HOME") is { Length: > 0 } h ? Path.GetFullPath(h) : null;
+    // A fixture home that is the real profile (or above it) is ignored: test-mode rules must never touch real data.
+    readonly string? fixtureHome = Environment.GetEnvironmentVariable("AISTACK_DOCTOR_HOME") is { Length: > 0 } h
+                                   && !DoctorFS.CoversRealHome(h) ? Path.GetFullPath(h) : null;
     Timer? timer;
     bool running;
 

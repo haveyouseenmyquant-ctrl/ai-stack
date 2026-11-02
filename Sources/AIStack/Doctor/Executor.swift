@@ -121,7 +121,7 @@ final class DoctorExecutor {
             try journal.append(rec)
         } catch { return ("failed", 0) }
         crashPoint("quarantine-intent")
-        guard rename(path, dest) == 0 else {
+        guard DoctorFS.renameNoReplace(path, dest) == 0 else {
             rec.phase = "failed"; rec.reason = "rename errno \(errno)"; rec.ts = DoctorFS.iso(); try? journal.append(rec)
             return ("failed", 0)
         }
@@ -139,7 +139,7 @@ final class DoctorExecutor {
         guard Self.state(dest)?.sha256 == before.sha256 else { appendUndo(r, "undo-failed", "quarantined copy missing or changed"); return false }
         appendUndo(r, "undo-intent", nil, temp: dest)
         try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-        guard rename(dest, path) == 0 else { appendUndo(r, "undo-failed", "rename errno \(errno)"); return false }
+        guard DoctorFS.renameNoReplace(dest, path) == 0 else { appendUndo(r, "undo-failed", "rename errno \(errno)"); return false }
         crashPoint("unquarantine-moved")
         chmod(path, mode_t(before.mode))
         rmdir((dest as NSString).deletingLastPathComponent)
@@ -154,7 +154,7 @@ final class DoctorExecutor {
         var e = r
         e.ts = DoctorFS.iso(); e.temp = nil
         if r.phase == "intent" {
-            if DoctorFS.lstat(path) == nil, DoctorFS.lstat(dest) != nil { rename(dest, path) }
+            if DoctorFS.lstat(path) == nil, DoctorFS.lstat(dest) != nil { DoctorFS.renameNoReplace(dest, path) }
             chmod(path, mode_t(before.mode))
             rmdir((dest as NSString).deletingLastPathComponent)
             e.phase = "failed"; e.reason = "interrupted; file put back"
@@ -340,7 +340,7 @@ final class DoctorExecutor {
               !FileManager.default.fileExists(atPath: from) else { appendUndo(r, "undo-failed", "not in Trash any more"); return false }
         appendUndo(r, "undo-intent", nil)
         try? FileManager.default.createDirectory(atPath: (from as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-        guard rename(to, from) == 0 else { appendUndo(r, "undo-failed", "rename errno \(errno)"); return false }
+        guard DoctorFS.renameNoReplace(to, from) == 0 else { appendUndo(r, "undo-failed", "rename errno \(errno)"); return false }
         appendUndo(r, "undo-done", nil)
         return true
     }
@@ -365,7 +365,7 @@ final class DoctorExecutor {
             if let orig = r.from, FileManager.default.fileExists(atPath: orig) {
                 unlink(temp)
             } else if let orig = r.from, FileManager.default.fileExists(atPath: temp) {
-                rename(temp, orig)   // never expected (rename is atomic), but never leave the file missing
+                DoctorFS.renameNoReplace(temp, orig)   // never expected (rename is atomic), but never leave the file missing
             }
             var e = r
             e.phase = r.phase == "intent" ? "failed" : "undo-failed"; e.reason = "interrupted; recovered"; e.ts = DoctorFS.iso()
@@ -404,7 +404,7 @@ final class DoctorExecutor {
             e.freedBytes = max(0, (r.manifest ?? []).reduce(Int64(0)) { $0 + $1.state.blocks } - v.blocks) * 512
         } else {
             // Never expected: put the aside copy back rather than lose anything.
-            if DoctorFS.lstat(tag + "-d") != nil { rename(tag + "-d", path) }
+            if DoctorFS.lstat(tag + "-d") != nil { DoctorFS.renameNoReplace(tag + "-d", path) }
             e.phase = "failed"; e.reason = "interrupted; folder restored"; e.manifest = nil
         }
         try? journal.append(e)
@@ -431,7 +431,9 @@ final class DoctorExecutor {
 
     func execute(_ plan: TreatmentPlan, approvals: [JournalRecord]) -> Outcome {
         var o = Outcome()
-        let approved = Dictionary(approvals.filter { $0.phase == "approval" }.compactMap { r in r.planItem.map { ($0, r) } },
+        // Only approvals recorded for this plan's own checkup count: the item id is stable across checkups, so an old
+        // approval (of an item since restored by Undo, say) must not carry over to a later plan.
+        let approved = Dictionary(approvals.filter { $0.phase == "approval" && $0.checkup == plan.checkup }.compactMap { r in r.planItem.map { ($0, r) } },
                                   uniquingKeysWith: { a, _ in a })
         for item in plan.groups.flatMap(\.items) {
             if let why = guardian.refusal(item.path) { log(item, phase: "refused", reason: why); o.refused += 1; continue }
@@ -466,7 +468,7 @@ final class DoctorExecutor {
         var ok = false
         if testRoot {
             try? FileManager.default.createDirectory(atPath: trash, withIntermediateDirectories: true)
-            ok = rename(f.path, dest) == 0
+            ok = DoctorFS.renameNoReplace(f.path, dest) == 0
         } else {
             var result: NSURL?
             ok = (try? FileManager.default.trashItem(at: URL(fileURLWithPath: f.path), resultingItemURL: &result)) != nil

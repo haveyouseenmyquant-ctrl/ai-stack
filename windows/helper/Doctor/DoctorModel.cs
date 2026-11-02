@@ -80,6 +80,23 @@ public class TreatmentPlan
 
 public static class DoctorFS
 {
+    /// A fixture root must not be the real profile or a folder above it: `--root %USERPROFILE%` would run Tier 1 and
+    /// Tier 2 on real data under test-mode rules. Compared on full paths (junction targets too), ignoring case.
+    public static bool CoversRealHome(string root)
+    {
+        static string Norm(string p)
+        {
+            var f = Path.GetFullPath(p);
+            try { if (new DirectoryInfo(f).ResolveLinkTarget(true) is { } t) f = t.FullName; } catch (IOException) { }
+            f = f.ToLowerInvariant().Replace('\\', '/');
+            return f.EndsWith('/') ? f : f + "/";
+        }
+        var homes = new[] { Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                            Environment.GetEnvironmentVariable("USERPROFILE"), Environment.GetEnvironmentVariable("HOME") };
+        var r = Norm(root);
+        return homes.Where(h => !string.IsNullOrEmpty(h)).Any(h => Norm(h!).StartsWith(r, StringComparison.Ordinal));
+    }
+
     public static readonly JsonSerializerOptions Json = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,

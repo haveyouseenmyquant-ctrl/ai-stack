@@ -67,6 +67,7 @@ enum DoctorCLI {
         let writing = ["tier1", "checkup", "decide", "undo-checkup", "approve", "decline", "rule-add", "rule-remove", "execute", "undo", "recover"].contains(verb)
         if writing && root == nil { throw UsageError(description: "\(verb) needs --root <fixture home>; real-home writes are not enabled") }
         if root != nil && !FileManager.default.fileExists(atPath: home) { throw UsageError(description: "no such root \(home)") }
+        if let r = root, DoctorFS.coversRealHome(r) { throw UsageError(description: "--root \(r) is the real home or above it; use a fixture home") }
 
         func scan() -> ([Finding], [String]) {
             var s = DoctorScanner(home: home, catalogue: catalogue, optedInFolders: archive, testRoot: root != nil)
@@ -123,13 +124,15 @@ enum DoctorCLI {
             let plan = try loadPlan()
             let ids = Set((o.one("items") ?? "").split(separator: ",").map(String.init))
             let items = plan.groups.flatMap(\.items).filter { o.flags.contains("all") || ids.contains($0.id) }
-            executor(try journal()).approve(items, by: o.one("by") ?? "user")
+            DoctorExecutor(home: home, catalogue: catalogue, journal: try journal(), checkup: plan.checkup, testRoot: root != nil)
+                .approve(items, by: o.one("by") ?? "user")
             print("approved \(items.count)")
         case "decline":
             let plan = try loadPlan()
             let ids = Set((o.one("items") ?? "").split(separator: ",").map(String.init))
             let items = plan.groups.flatMap(\.items).filter { o.flags.contains("all") || ids.contains($0.id) }
-            executor(try journal()).decline(items, by: "user")
+            DoctorExecutor(home: home, catalogue: catalogue, journal: try journal(), checkup: plan.checkup, testRoot: root != nil)
+                .decline(items, by: "user")
             print("declined \(items.count)")
         case "rule-add":
             guard let dir = o.one("dir"), let cat = o.one("category") else { throw UsageError(description: "--dir and --category required") }
@@ -167,7 +170,7 @@ enum DoctorCLI {
             }
         case "execute":
             let j = try journal()
-            try emit(executor(j).execute(try loadPlan(), approvals: DoctorJournal.read(j.path)), nil)
+            try emit(executor(j).execute(try loadPlan(), approvals: DoctorJournal.read(j.path).reversed()), nil)   // newest first
         case "undo":
             let j = try journal()
             try emit(executor(j).undo(records: DoctorJournal.read(j.path), entry: o.one("entry")), nil)

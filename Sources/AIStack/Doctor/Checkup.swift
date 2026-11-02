@@ -54,7 +54,12 @@ enum DoctorCheckup {
         let merged = DoctorPendingBook.load(dir + "/pending.json").merge(fresh: findings, records: records, now: checkup)
         let rules = DoctorRuleBook.load(dir + "/rules.json", catalogue: catalogue)
         var ruledItems: [Finding] = [], left: [Finding] = []
-        for f in merged.items { if let r = rules.rule(for: f) { ruledItems.append(f); ex.approve([f], by: "rule:" + r.id) } else { left.append(f) } }
+        // Rules act only on what this checkup's own scan found; an entry only carried over from pending.json (which
+        // anything able to write the support folder could edit) goes on the plan for the user instead.
+        let confirmed = Set(findings.map(\.id))
+        for f in merged.items {
+            if confirmed.contains(f.id), let r = rules.rule(for: f) { ruledItems.append(f); ex.approve([f], by: "rule:" + r.id) } else { left.append(f) }
+        }
         var ruled: DoctorExecutor.Outcome? = nil
         if !ruledItems.isEmpty {
             let sub = DoctorCLI.makePlan(ruledItems, catalogue: catalogue, checkup: checkup, root: home)

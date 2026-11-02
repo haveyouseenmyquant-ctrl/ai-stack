@@ -526,7 +526,9 @@ public class DoctorExecutor
     {
         var o = new Outcome();
         var approved = new Dictionary<string, JournalRecord>();
-        foreach (var r in approvals.Where(r => r.Phase == "approval" && r.PlanItem != null)) approved.TryAdd(r.PlanItem!, r);
+        // Only approvals recorded for this plan's own checkup count: the item id is stable across checkups, so an old
+        // approval (of an item since restored by Undo, say) must not carry over to a later plan.
+        foreach (var r in approvals.Where(r => r.Phase == "approval" && r.Checkup == plan.Checkup && r.PlanItem != null)) approved.TryAdd(r.PlanItem!, r);
         foreach (var item in plan.Groups.SelectMany(g => g.Items))
         {
             if (guardian.Refusal(item.Path) is string why) { Log(item, "refused", why); o.Refused++; continue; }

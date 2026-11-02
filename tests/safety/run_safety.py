@@ -468,6 +468,24 @@ def t_approval_for_other_item_does_not_count(c, res):
     assert changed and all(os.path.realpath(os.path.join(home, k)).startswith(allowed) for k in changed), f"unapproved items changed: {changed[:5]}"
 
 
+def t_old_approval_does_not_carry_over(c, res):
+    # Approved, executed and undone in one checkup; the same item in a later plan must ask again.
+    home, exp, j, out = c.fixture()
+    first, second = os.path.join(out, "plan1.json"), os.path.join(out, "plan2.json")
+    c.doctor("plan", "--root", home, "--checkup", "2026-01-01T00:00:00Z", "--out", first)
+    one = items(load(first))[0]
+    c.doctor("approve", "--plan", first, "--journal", j, "--items", one["id"], "--root", home)
+    c.doctor("execute", "--root", home, "--plan", first, "--journal", j)
+    assert not os.path.exists(one["path"]), "the approved item was not executed"
+    c.doctor("undo", "--root", home, "--journal", j)
+    assert os.path.exists(one["path"]), "undo did not bring the item back"
+    c.doctor("plan", "--root", home, "--checkup", "2026-01-08T00:00:00Z", "--out", second)
+    assert one["id"] in {i["id"] for i in items(load(second))}, "the item is not on the later plan"
+    before = snapshot(home)
+    c.doctor("execute", "--root", home, "--plan", second, "--journal", j)
+    assert not diff(before, snapshot(home), "all"), "an approval from an earlier checkup was reused"
+
+
 def t_rules_cannot_approve_lossy(c, res):
     home, exp, j, out = c.fixture()
     plan, p = plan_for(c, home, out)
@@ -650,6 +668,18 @@ def t_plans_carry_over_and_rules(c, res):
     assert not touched, f"rule run touched {touched}"
     c.doctor("undo", "--root", home, "--journal", j)
     assert not diff(before, snapshot(home, skip_trash=True), "hash"), "undo did not restore the ruled Trash moves"
+    # A carried-over entry the fresh scan doesn't confirm (here a forged one in pending.json, for a document) is
+    # never approved by a rule: it goes back on the plan for the user to decide.
+    doc = os.path.join(home, "Documents", "draft-last-month.txt")
+    st = os.stat(doc)
+    pb = load(os.path.join(d, "pending.json"))
+    pb["items"].append({"firstSeen": r5["checkup"], "item": {"action": "moveToTrash", "bytes": st.st_size, "category": "cache",
+                        "fingerprint": {"mtime": st.st_mtime, "sha256": sha(doc), "size": st.st_size},
+                        "id": "p-forged0000000000", "path": doc, "reason": "forged", "tier": 2}})
+    json.dump(pb, open(os.path.join(d, "pending.json"), "w"))
+    rf, pf = checkup()
+    assert os.path.exists(doc), "a rule acted on a carried-over entry the scan did not confirm"
+    assert "p-forged0000000000" in ids(pf), "the unconfirmed carried-over entry is not on the plan for the user"
     # Removing a rule (Settings) stops later auto-approvals; an unknown id is refused; forged rules aren't listed.
     listed = json.loads(c.doctor("rules", "--root", home, "--dir", d).stdout)["rules"]
     assert [r["category"] for r in listed] == ["cache"], f"rules list shows {listed}"
@@ -808,6 +838,14 @@ def t_writes_need_root(c, res):
     assert r.returncode != 0, "checkup ran without --root"
     r = c.doctor("execute", "--plan", "/nonexistent", "--journal", os.path.join(c.work, "x.jsonl"), check=False)
     assert r.returncode != 0, "execute ran without --root"
+    # --root must not be the real home (or above it, or the same folder spelled in another case or with a trailing
+    # separator). `undo` with an empty journal is used so that even a missing refusal would change nothing.
+    empty = os.path.join(c.work, "empty.jsonl")
+    open(empty, "w").close()
+    real = os.path.expanduser("~")
+    for r in [real, real + os.sep, real.swapcase(), os.path.dirname(real)]:
+        p = c.doctor("undo", "--root", r, "--journal", empty, check=False)
+        assert p.returncode != 0, f"--root {r} (the real home) was accepted"
 
 
 def planted(c, res):
@@ -842,7 +880,7 @@ SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_arch
           t_crash_points_compress if WINDOWS else t_quarantine_roundtrip_and_crash_points,
           *([] if WINDOWS else [t_compress_keeps_metadata]),
           t_changed_between_plan_and_execute, t_no_approval_no_action,
-          t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
+          t_approval_for_other_item_does_not_count, t_old_approval_does_not_carry_over, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
           t_writes_need_root, t_summary_sends_no_user_names, t_checkup_respects_switches, t_schedule_once_per_slot,
           t_plans_carry_over_and_rules] + ([t_evict_cloud_roundtrip] if WINDOWS else []) + [t_report_window_decisions] + ([t_extension_page_drives_host] if WINDOWS else [])
 

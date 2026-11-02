@@ -59,6 +59,7 @@ public static class DoctorCli
         if (verb is "tier1" or "checkup" or "decide" or "undo-checkup" or "approve" or "decline" or "rule-add" or "rule-remove" or "execute" or "undo" or "recover" && root == null)
             throw new InvalidOperationException($"{verb} needs --root <fixture home>; real-profile writes are not enabled");
         if (root != null && !Directory.Exists(home)) throw new InvalidOperationException($"no such root {home}");
+        if (root != null && DoctorFS.CoversRealHome(root)) throw new InvalidOperationException($"--root {root} is the real profile or above it; use a fixture home");
 
         (List<Finding>, List<string>) Scan()
         {
@@ -116,7 +117,7 @@ public static class DoctorCli
                 var plan = LoadPlan();
                 var ids = (One("items") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
                 var items = plan.Groups.SelectMany(g => g.Items).Where(i => flags.Contains("all") || ids.Contains(i.Id)).ToList();
-                Executor(Journal()).Approve(items, One("by") ?? "user");
+                new DoctorExecutor(home, catalogue, Journal(), plan.Checkup, root != null).Approve(items, One("by") ?? "user");
                 Console.WriteLine($"approved {items.Count}");
                 break;
             }
@@ -125,7 +126,7 @@ public static class DoctorCli
                 var plan = LoadPlan();
                 var ids = (One("items") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
                 var items = plan.Groups.SelectMany(g => g.Items).Where(i => flags.Contains("all") || ids.Contains(i.Id)).ToList();
-                Executor(Journal()).Decline(items, "user");
+                new DoctorExecutor(home, catalogue, Journal(), plan.Checkup, root != null).Decline(items, "user");
                 Console.WriteLine($"declined {items.Count}");
                 break;
             }
@@ -172,7 +173,7 @@ public static class DoctorCli
             case "execute":
             {
                 var j = Journal();
-                Emit(Executor(j).Execute(LoadPlan(), DoctorJournal.Read(j.Path)), null);
+                Emit(Executor(j).Execute(LoadPlan(), DoctorJournal.Read(j.Path).AsEnumerable().Reverse().ToList()), null);   // newest first
                 break;
             }
             case "undo":
