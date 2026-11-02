@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography.X509Certificates;
+using System.Text.RegularExpressions;
 
 namespace AIStack.Doctor;
 
@@ -392,10 +393,23 @@ public class DoctorScanner
             {
                 var r = Run(mp, $"-Scan -ScanType 3 -File \"{root}\" -DisableRemediation");
                 if (r.Status == -1) Skipped.Add($"malware: Defender scan of {Rel(root)}: {r.Text}");
-                // Exit code 2 = threats found. The listing format varies by version, so pick out every "file:_" resource.
+                // Exit code 2 = threats found. The listing varies by version: resources appear as "file:_C:\x" or as
+                // "    file : C:\x" under the "Threat : <name>" line, so accept both and keep the last threat name seen.
                 if (r.Status == 2)
-                    foreach (var line in r.Text.Split('\n'))
-                        if (line.Contains(":_")) Add(line.Trim(), "a threat");
+                {
+                    var threat = "a threat";
+                    foreach (var raw in r.Text.Split('\n'))
+                    {
+                        var line = raw.Trim();
+                        if (Regex.Match(line, @"^Threat\s*:\s*(.+)$") is { Success: true } t) threat = t.Groups[1].Value.Trim();
+                        else if (line.Contains(":_")) Add(line, threat);
+                        else if (Regex.Match(line, @"^(?:file|containerfile)\s*:\s*(.+)$", RegexOptions.IgnoreCase) is { Success: true } m)
+                            Add("file:_" + m.Groups[1].Value, threat);
+                    }
+                    if (hits.Count == 0) Skipped.Add($"malware: Defender found threats in {Rel(root)} but none could be matched: " +
+                                                     string.Join(" | ", r.Text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).Take(12)));
+                }
+                else if (r.Status != 0 && r.Status != -1) Skipped.Add($"malware: Defender scan of {Rel(root)} exited {r.Status}: {r.Text.Trim().Split('\n')[0]}");
             }
             History();
         }
