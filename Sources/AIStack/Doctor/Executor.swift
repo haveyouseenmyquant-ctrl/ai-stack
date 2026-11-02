@@ -192,7 +192,7 @@ final class DoctorExecutor {
                                 from: path, to: zip, temp: temp, before: manifest.first?.state, reason: f.reason, manifest: manifest)
         do { try journal.append(rec) } catch { return ("failed", 0) }
         let fail: (String) -> (String, Int64) = { why in
-            unlink(temp); try? FileManager.default.removeItem(atPath: check)
+            unlink(temp); Self.removeTree(check)
             rec.phase = "failed"; rec.reason = why; rec.ts = DoctorFS.iso(); rec.manifest = nil
             try? self.journal.append(rec)
             return ("failed", 0)
@@ -203,7 +203,7 @@ final class DoctorExecutor {
         let x = DoctorScanner.run("/usr/bin/ditto", ["-x", "-k", temp, check])
         guard x.status == 0 else { return fail("ditto -x: \(x.text)") }
         guard let back = Self.manifest(check), Self.sameContents(manifest, back) else { return fail("verify: extracted zip differs") }
-        try? FileManager.default.removeItem(atPath: check)
+        Self.removeTree(check)
         guard let zstate = Self.state(temp) else { return fail("zip vanished") }
         // The folder must not have changed while we zipped it.
         guard let again = Self.manifest(path, hash: false), Self.sameShape(manifest, again) else { return fail("changed during archiving") }
@@ -217,7 +217,7 @@ final class DoctorExecutor {
             unlink(zip); return fail("rename folder errno \(errno)")
         }
         crashPoint("archive-aside")
-        try? FileManager.default.removeItem(atPath: aside)
+        Self.removeTree(aside)
         crashPoint("archive-removed")
         let freed = max(0, manifest.reduce(Int64(0)) { $0 + $1.state.blocks } - zstate.blocks) * 512
         rec.phase = "done"; rec.after = zstate; rec.temp = nil; rec.manifest = manifest; rec.freedBytes = freed; rec.ts = DoctorFS.iso()
@@ -231,10 +231,10 @@ final class DoctorExecutor {
         guard DoctorFS.lstat(path) == nil, DoctorFS.lstat(zip) != nil else { appendUndo(r, "undo-failed", "folder exists or zip missing"); return false }
         if let why = guardian.refusal(zip, forWrite: false) { appendUndo(r, "undo-failed", why); return false }
         let out = (path as NSString).deletingLastPathComponent + "/." + (path as NSString).lastPathComponent + ".ld-" + r.id.prefix(8) + "-u"
-        try? FileManager.default.removeItem(atPath: out)
+        Self.removeTree(out)
         appendUndo(r, "undo-intent", nil, temp: out)
         let fail: (String) -> Bool = { why in
-            try? FileManager.default.removeItem(atPath: out); self.appendUndo(r, "undo-failed", why); return false
+            Self.removeTree(out); self.appendUndo(r, "undo-failed", why); return false
         }
         let x = DoctorScanner.run("/usr/bin/ditto", ["-x", "-k", zip, out])
         guard x.status == 0 else { return fail("ditto -x: \(x.text)") }
@@ -243,7 +243,10 @@ final class DoctorExecutor {
         // Deepest first so restoring a folder's times isn't undone by touching its children.
         for e in manifest.sorted(by: { $0.rel.count > $1.rel.count }) {
             let p = e.rel.isEmpty ? out : out + "/" + e.rel
-            guard chmod(p, mode_t(e.state.mode)) == 0, Self.setTimes(p, mtime: e.state.mtime, birth: e.state.birth) else { return fail("restore metadata") }
+            let qtnOK = e.qtn.map { q in q.withCString { setxattr(p, "com.apple.quarantine", $0, strlen($0), 0, XATTR_NOFOLLOW) == 0 } }
+                ?? (Self.xattr(p, "com.apple.quarantine") == nil || removexattr(p, "com.apple.quarantine", XATTR_NOFOLLOW) == 0)
+            guard qtnOK, chmod(p, mode_t(e.state.mode)) == 0, chflags(p, e.flags ?? 0) == 0,
+                  Self.setTimes(p, mtime: e.state.mtime, birth: e.state.birth) else { return fail("restore metadata") }
         }
         guard rename(out, path) == 0 else { return fail("rename errno \(errno)") }
         crashPoint("unarchive-in-place")
@@ -256,26 +259,85 @@ final class DoctorExecutor {
     static func manifest(_ root: String, hash: Bool = true) -> [ManifestEntry]? {
         var out: [ManifestEntry] = []
         func walk(_ p: String, _ rel: String) -> Bool {
-            guard let st = DoctorFS.lstat(p) else { return false }
+            guard let st = DoctorFS.lstat(p), st.st_flags & ~keptFlags & ~UInt32(UF_COMPRESSED) == 0 else { return false }
             let kind = st.st_mode & S_IFMT
+            func entry(_ s: FileState, dir: Bool) -> ManifestEntry {
+                var e = ManifestEntry(rel: rel, dir: dir, state: s)
+                if hash {
+                    e.meta = extendedMeta(p)
+                    e.flags = st.st_flags & keptFlags == 0 ? nil : st.st_flags & keptFlags
+                    e.qtn = xattr(p, "com.apple.quarantine").map { String(decoding: $0, as: UTF8.self) }
+                }
+                return e
+            }
             if kind == S_IFREG {
                 guard st.st_nlink == 1, let s = state(p, hash: hash), !hash || s.sha256 != nil else { return false }
-                out.append(ManifestEntry(rel: rel, dir: false, state: s)); return true
+                out.append(entry(s, dir: false)); return true
             }
             guard kind == S_IFDIR, let s = state(p, hash: false),
                   let names = try? FileManager.default.contentsOfDirectory(atPath: p) else { return false }
-            out.append(ManifestEntry(rel: rel, dir: true, state: s))
+            out.append(entry(s, dir: true))
             for n in names.sorted() where !walk(p + "/" + n, rel.isEmpty ? n : rel + "/" + n) { return false }
             return true
         }
         return walk(root, "") ? out : nil
     }
 
-    /// Same entry list, kinds and file bytes (times are restored from the manifest, so they are not compared).
+    /// Removes one of our own trees (the check extraction, a folder moved aside after its zip verified, a failed
+    /// restore). A zip keeps ACLs and modes, so first clear what would stop the removal: "deny delete" ACL entries,
+    /// read-only folders and the flags. Symlinks are never followed (an archived folder holds none anyway).
+    static func removeTree(_ root: String) {
+        func open(_ p: String) {
+            guard let st = DoctorFS.lstat(p), st.st_mode & S_IFMT != S_IFLNK else { return }
+            _ = chflags(p, 0)
+            if let empty = acl_init(0) { _ = acl_set_link_np(p, ACL_TYPE_EXTENDED, empty); acl_free(UnsafeMutableRawPointer(empty)) }
+            guard st.st_mode & S_IFMT == S_IFDIR else { return }
+            _ = chmod(p, 0o700)
+            for n in (try? FileManager.default.contentsOfDirectory(atPath: p)) ?? [] { open(p + "/" + n) }
+        }
+        guard DoctorFS.lstat(root) != nil else { return }
+        open(root)
+        try? FileManager.default.removeItem(atPath: root)
+    }
+
+    /// The only file flags a folder may carry to be archived; the manifest keeps them and undo puts them back.
+    /// (Locked or system flags mean no archiving: the folder couldn't be removed, or the flags not restored.)
+    static let keptFlags = UInt32(UF_HIDDEN | UF_NODUMP)
+
+    /// A digest of the extended attributes and ACL, which ditto keeps in the zip. Leaves out com.apple.provenance
+    /// (the system adds it) and the quarantine attribute (ditto rewrites it; the manifest keeps it verbatim).
+    static func extendedMeta(_ p: String) -> String? {
+        var parts: [Data] = []
+        let n = listxattr(p, nil, 0, XATTR_NOFOLLOW)
+        if n > 0 {
+            var buf = [CChar](repeating: 0, count: n)
+            let m = listxattr(p, &buf, n, XATTR_NOFOLLOW)
+            let names = m > 0 ? buf[..<m].split(separator: 0).map { String(decoding: $0.map { UInt8(bitPattern: $0) }, as: UTF8.self) } : []
+            for name in names.sorted() where name != "com.apple.provenance" && name != "com.apple.quarantine" {
+                parts.append(Data(name.utf8) + Data([0]) + (xattr(p, name) ?? Data("?unreadable".utf8)) + Data([0]))
+            }
+        }
+        if let acl = acl_get_link_np(p, ACL_TYPE_EXTENDED) {
+            if let t = acl_to_text(acl, nil) { parts.append(Data("acl\0".utf8) + Data(String(cString: t).utf8)); acl_free(t) }
+            acl_free(UnsafeMutableRawPointer(acl))
+        }
+        return parts.isEmpty ? nil : DoctorFS.sha256(parts.reduce(Data(), +))
+    }
+
+    static func xattr(_ p: String, _ name: String) -> Data? {
+        let n = getxattr(p, name, nil, 0, 0, XATTR_NOFOLLOW)
+        guard n >= 0 else { return nil }
+        var d = Data(count: n)
+        let m = n == 0 ? 0 : d.withUnsafeMutableBytes { getxattr(p, name, $0.baseAddress, n, 0, XATTR_NOFOLLOW) }
+        return m == n ? d : nil
+    }
+
+    /// Same entry list, kinds, file bytes and extended attributes / ACL (times, flags and quarantine are restored
+    /// from the manifest, so they are not compared).
     static func sameContents(_ a: [ManifestEntry], _ b: [ManifestEntry]) -> Bool {
         let bm = Dictionary(b.map { ($0.rel, $0) }, uniquingKeysWith: { x, _ in x })
         return a.count == b.count && a.allSatisfy { e in
-            guard let o = bm[e.rel], o.dir == e.dir else { return false }
+            guard let o = bm[e.rel], o.dir == e.dir, o.meta == e.meta else { return false }
             return e.dir || (o.state.sha256 == e.state.sha256 && o.state.size == e.state.size)
         }
     }
@@ -387,11 +449,11 @@ final class DoctorExecutor {
                 // The folder is only renamed into place after it verified, so the restore is complete.
                 unlink(zip); e.phase = "undo-done"; e.reason = "interrupted after restore; finished"
             } else {
-                try? fm.removeItem(atPath: temp); e.phase = "undo-failed"; e.reason = "interrupted; recovered"
+                Self.removeTree(temp); e.phase = "undo-failed"; e.reason = "interrupted; recovered"
             }
             try? journal.append(e); return
         }
-        unlink(temp); try? fm.removeItem(atPath: tag + "-v")
+        unlink(temp); Self.removeTree(tag + "-v")
         let verified = records.last { $0.id == r.id && $0.phase == "verified" }?.after
         if DoctorFS.lstat(path) != nil {
             // Folder intact: drop our zip if it got into place, and leave things as they were.
@@ -399,7 +461,7 @@ final class DoctorExecutor {
             e.phase = "failed"; e.reason = "interrupted; recovered"; e.manifest = nil
         } else if let v = verified, DoctorFS.lstat(zip) != nil {
             // The verified zip is in place and the folder was moved aside: finish removing it.
-            try? fm.removeItem(atPath: tag + "-d")
+            Self.removeTree(tag + "-d")
             e.phase = "done"; e.after = v; e.reason = "interrupted while removing the folder; finished"
             e.freedBytes = max(0, (r.manifest ?? []).reduce(Int64(0)) { $0 + $1.state.blocks } - v.blocks) * 512
         } else {

@@ -26,6 +26,9 @@ struct ManifestEntry: Codable {
     var rel: String     // "" is the folder itself
     var dir: Bool
     var state: FileState
+    var meta: String? = nil     // SHA-256 of the extended attributes and ACL that a zip round-trip must keep
+    var flags: UInt32? = nil    // hidden / nodump, which a zip drops: restored on undo
+    var qtn: String? = nil      // quarantine attribute, which ditto rewrites on extraction: restored on undo
 }
 
 struct FileState: Codable {

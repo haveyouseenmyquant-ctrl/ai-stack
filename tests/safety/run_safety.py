@@ -214,6 +214,70 @@ def win_meta(p, i=None):
     return ads, explicit, os.lstat(p).st_file_attributes & keep
 
 
+def mac_xattr():
+    """macOS: libc (Python has no os.*xattr there) and a reader of all extended attributes. Options 0x1 = XATTR_NOFOLLOW."""
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    def xattrs(p):
+        b = os.fsencode(p)
+        n = libc.listxattr(b, None, 0, 1)
+        buf = ctypes.create_string_buffer(max(n, 1)); libc.listxattr(b, buf, n, 1)
+        out = {}
+        for name in filter(None, buf.raw[:max(n, 0)].split(b"\0")):
+            m = libc.getxattr(b, name, None, 0, 0, 1)
+            v = ctypes.create_string_buffer(max(m, 1)); libc.getxattr(b, name, v, m, 0, 1)
+            out[name] = v.raw[:max(m, 0)]
+        return out
+    return libc, xattrs
+
+
+def t_archive_keeps_metadata(c, res):
+    """macOS: archive + undo bring back extended attributes, the quarantine attribute verbatim, an explicit ACL, the
+    hidden flag and a read-only mode; a folder holding a locked (uchg) file is not archived at all."""
+    home, exp, j, out = c.fixture()
+    libc, xattrs = mac_xattr()
+    folder = os.path.join(home, ARCHIVE)
+    files = sorted(os.path.join(r, n) for r, _, ns in os.walk(folder) for n in ns)
+    assert len(files) >= 2, "fixture archive folder too small"
+    def setx(p, name, v):
+        assert libc.setxattr(os.fsencode(p), name, v, len(v), 0, 1) == 0, f"setxattr {name}"
+    def acl(p):
+        return [l for l in subprocess.run(["ls", "-led", p], capture_output=True, text=True).stdout.splitlines()[1:]
+                if "inherited" not in l]
+    def meta(p):
+        st = os.lstat(p)
+        x = {k: v for k, v in xattrs(p).items() if k != b"com.apple.provenance"}
+        return stat.S_IMODE(st.st_mode), x, acl(p), st.st_flags & ~stat.UF_COMPRESSED
+    times = {p: os.lstat(p) for p in files + [folder]}
+    setx(files[0], b"com.apple.metadata:kMDItemWhereFroms", b"https://example.com/fixture")
+    setx(files[1], b"com.apple.quarantine", b"0081;5f5e1000;Safari;")
+    subprocess.run(["chmod", "+a", "everyone deny delete", files[0]], check=True)
+    os.chflags(files[1], stat.UF_HIDDEN, follow_symlinks=False)
+    os.chmod(files[-1], 0o444)
+    setx(folder, b"com.apple.FinderInfo", bytes(32))   # e.g. a folder label colour lives here
+    for p, t in times.items():
+        os.utime(p, ns=(t.st_atime_ns, t.st_mtime_ns))
+    m0 = {p: meta(p) for p in files + [folder]}
+    assert acl(files[0]) and m0[files[1]][3] == stat.UF_HIDDEN, f"planting failed: {m0[files[0]]} {m0[files[1]]}"
+    before = snapshot(home)
+    c.doctor("tier1", "--root", home, "--journal", j, "--archive", ARCHIVE)
+    assert os.path.isfile(folder + ".zip") and not os.path.exists(folder), "folder with metadata was not archived"
+    c.doctor("undo", "--root", home, "--journal", j)
+    assert os.path.isdir(folder) and not os.path.exists(folder + ".zip"), "undo did not bring the folder back"
+    after = {p: meta(p) for p in files + [folder]}
+    bad = [(os.path.relpath(p, home), m0[p], after[p]) for p in m0 if after[p] != m0[p]]
+    assert not bad, f"undo changed metadata: {bad[:2]}"
+    assert not diff(before, snapshot(home), "all"), "undo did not restore bytes and times"
+    os.chflags(files[0], stat.UF_IMMUTABLE, follow_symlinks=False)
+    try:
+        c.doctor("tier1", "--root", home, "--journal", j + ".2", "--archive", ARCHIVE)
+        assert os.path.isdir(folder) and not os.path.exists(folder + ".zip"), "archived a folder holding a locked file"
+    finally:
+        os.chflags(files[0], 0, follow_symlinks=False)
+        subprocess.run(["chmod", "-RN", folder], check=False)   # so the suite can remove its work folder
+    assert not leftovers(home), f"temp files left: {leftovers(home)}"
+
+
 def t_compress_keeps_metadata(c, res):
     """Compress + undo keep extended attributes, flags and mode (macOS) or alternate data streams, explicit permissions
     and attributes (Windows), and a read-only file still undoes."""
@@ -238,18 +302,7 @@ def t_compress_keeps_metadata(c, res):
         assert not compressed_files(home), f"still compressed after undo: {compressed_files(home)[:3]}"
         assert not diff(before, snapshot(home), "all"), "undo did not restore bytes and times"
         return
-    import ctypes
-    libc = ctypes.CDLL(None, use_errno=True)   # Python has no os.*xattr on macOS; options 0x1 = XATTR_NOFOLLOW
-    def xattrs(p):
-        b = os.fsencode(p)
-        n = libc.listxattr(b, None, 0, 1)
-        buf = ctypes.create_string_buffer(max(n, 1)); libc.listxattr(b, buf, n, 1)
-        out = {}
-        for name in filter(None, buf.raw[:max(n, 0)].split(b"\0")):
-            m = libc.getxattr(b, name, None, 0, 0, 1)
-            v = ctypes.create_string_buffer(max(m, 1)); libc.getxattr(b, name, v, m, 0, 1)
-            out[name] = v.raw[:max(m, 0)]
-        return out
+    libc, xattrs = mac_xattr()
     def meta(p):
         st = os.lstat(p)
         return stat.S_IMODE(st.st_mode), xattrs(p), st.st_flags & ~stat.UF_COMPRESSED
@@ -929,7 +982,7 @@ def planted(c, res):
 
 SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_archive_refuses_changed_or_odd_folders,
           t_crash_points_compress if WINDOWS else t_quarantine_roundtrip_and_crash_points,
-          t_compress_keeps_metadata,
+          t_compress_keeps_metadata] + ([] if WINDOWS else [t_archive_keeps_metadata]) + [
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_old_approval_does_not_carry_over, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
           t_writes_need_root, t_summary_sends_no_user_names, t_checkup_respects_switches, t_schedule_once_per_slot,
