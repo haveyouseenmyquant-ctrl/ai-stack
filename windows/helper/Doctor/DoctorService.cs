@@ -242,7 +242,9 @@ public sealed class DoctorService
             {
                 RequireWrites();
                 var plan = Read<TreatmentPlan>(Path.Combine(CheckupFolder(Str(m, "checkup")), "plan.json"));
-                HashSet<string>? ids = m["items"] is JsonArray a ? a.Select(x => x!.GetValue<string>()).ToHashSet() : null;
+                // The page always names the items; a request without them must not mean "everything".
+                if (m["items"] is not JsonArray a) throw new InvalidOperationException("doctor.decide needs the items");
+                var ids = a.Select(x => x!.GetValue<string>()).ToHashSet();
                 var res = DoctorDesk.Decide(Str(m, "decision"), ids, plan, Home, DoctorCatalogue.Load(null), new DoctorJournal(JournalPath), CheckupsPath, TestRoot);
                 return new JsonObject { ["result"] = Node(res) };
             }

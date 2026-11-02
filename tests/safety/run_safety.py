@@ -193,6 +193,50 @@ def t_tier1_roundtrip(c, res):
     assert not leftovers(home), f"temp files left: {leftovers(home)}"
 
 
+def t_compress_keeps_metadata(c, res):
+    """macOS: compress + undo keep extended attributes, flags and mode, and a read-only file still undoes."""
+    home, exp, j, out = c.fixture()
+    c.doctor("tier1", "--root", home, "--journal", j)
+    targets = compressed_files(home)
+    c.doctor("undo", "--root", home, "--journal", j)
+    assert targets, "nothing was compressed"
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)   # Python has no os.*xattr on macOS; options 0x1 = XATTR_NOFOLLOW
+    def xattrs(p):
+        b = os.fsencode(p)
+        n = libc.listxattr(b, None, 0, 1)
+        buf = ctypes.create_string_buffer(max(n, 1)); libc.listxattr(b, buf, n, 1)
+        out = {}
+        for name in filter(None, buf.raw[:max(n, 0)].split(b"\0")):
+            m = libc.getxattr(b, name, None, 0, 0, 1)
+            v = ctypes.create_string_buffer(max(m, 1)); libc.getxattr(b, name, v, m, 0, 1)
+            out[name] = v.raw[:max(m, 0)]
+        return out
+    def meta(p):
+        st = os.lstat(p)
+        return stat.S_IMODE(st.st_mode), xattrs(p), st.st_flags & ~stat.UF_COMPRESSED
+    for i, p in enumerate(targets):
+        t = os.lstat(p)
+        v = b"https://example.com/fixture"
+        assert libc.setxattr(os.fsencode(p), b"com.apple.metadata:kMDItemWhereFroms", v, len(v), 0, 1) == 0, "setxattr"
+        if i % 2 == 0:
+            os.chmod(p, 0o444)
+        if i % 3 == 0:
+            os.chflags(p, stat.UF_HIDDEN, follow_symlinks=False)
+        os.utime(p, ns=(t.st_atime_ns, t.st_mtime_ns))
+    before, m0 = snapshot(home), {p: meta(p) for p in targets}
+    j2 = j + ".2"
+    c.doctor("tier1", "--root", home, "--journal", j2)
+    assert compressed_files(home), "nothing was compressed the second time"
+    mid = {p: meta(p) for p in targets}
+    assert mid == m0, f"compress changed metadata: {[p for p in targets if mid[p] != m0[p]][:3]}"
+    c.doctor("undo", "--root", home, "--journal", j2)
+    after = {p: meta(p) for p in targets}
+    assert after == m0, f"undo changed metadata: {[(p, m0[p], after[p]) for p in targets if after[p] != m0[p]][:2]}"
+    assert not compressed_files(home), f"still compressed after undo: {compressed_files(home)[:3]}"
+    assert not diff(before, snapshot(home), "all"), "undo did not restore bytes and times"
+
+
 def t_kill_during_tier1(c, res, trials=12):
     home, exp, j, out = c.fixture()
     before = snapshot(home)
@@ -444,6 +488,15 @@ def t_never_list_refused(c, res):
             forged.append({"id": "forged-" + t["id"], "category": "cache", "action": "moveToTrash", "tier": 2, "path": path,
                            "bytes": st.st_size, "reason": "forged", "fingerprint": {"size": st.st_size, "mtime": st.st_mtime,
                                                                                       "sha256": sha(path)}})
+    # The same locations spelled in another letter case (APFS and NTFS ignore case, so it is the same file).
+    for t in exp["mustNotTouch"]:
+        if t["why"] == "never-list location":
+            path = os.path.join(home, *t["path"].swapcase().split("/"))
+            if os.path.exists(path):
+                st = os.stat(path)
+                forged.append({"id": "forged-case-" + t["id"], "category": "cache", "action": "moveToTrash", "tier": 2,
+                               "path": path, "bytes": st.st_size, "reason": "forged, other case",
+                               "fingerprint": {"size": st.st_size, "mtime": st.st_mtime, "sha256": sha(path)}})
     # The folder that holds a never-list location is refused too (moving it would take the location with it).
     trap = next(t["path"].split("/") for t in exp["mustNotTouch"] if "/Chrome/" in t["path"])
     holder = os.path.join(home, *trap[:trap.index("Chrome")])   # .../Google, which holds Chrome's profile
@@ -461,6 +514,8 @@ def t_never_list_refused(c, res):
     assert sha(MAKE) == make_sha and os.path.exists(MAKE)
     recs = [json.loads(l) for l in open(j)]
     assert sum(r["phase"] == "refused" for r in recs) == len(forged), "not every forged item was refused"
+    case = [r for r in recs if r["phase"] == "refused" and str(r.get("planItem")).startswith("forged-case-")]
+    assert case and all("never" in (r.get("reason") or "") for r in case), f"other-case path not refused as never-list: {case[:2]}"
 
 
 def t_traps_untouched(c, res):
@@ -706,6 +761,9 @@ def t_extension_page_drives_host(c, res):
         assert g["ok"] and not g["decided"] and g["plan"]["groups"], f"get: {g}"
         cache = [i["id"] for grp in g["plan"]["groups"] for i in grp["items"] if i["category"] == "cache"]
         assert cache, "fixture lacks cache items"
+        snap = snapshot(home, skip_trash=True)
+        assert not h.call("doctor.decide", checkup=cid, decision="approve")["ok"], "approve without items was accepted"
+        assert not diff(snap, snapshot(home, skip_trash=True), "hash"), "approve without items changed files"
         o = h.call("doctor.decide", checkup=cid, decision="approve", items=cache)
         assert o["ok"] and o["result"]["outcome"]["done"] == len(cache), f"approve: {o}"
         assert h.call("doctor.decide", checkup=cid, decision="approve", items=cache)["result"]["decided"] == 0, "approved twice"
@@ -782,6 +840,7 @@ def planted(c, res):
 
 SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_archive_refuses_changed_or_odd_folders,
           t_crash_points_compress if WINDOWS else t_quarantine_roundtrip_and_crash_points,
+          *([] if WINDOWS else [t_compress_keeps_metadata]),
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
           t_writes_need_root, t_summary_sends_no_user_names, t_checkup_respects_switches, t_schedule_once_per_slot,

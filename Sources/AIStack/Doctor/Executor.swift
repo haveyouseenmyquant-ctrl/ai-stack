@@ -314,13 +314,18 @@ final class DoctorExecutor {
         if let why = guardian.refusal(path, forWrite: false) { appendUndo(r, "undo-failed", why); return false }
         let temp = Self.tempSibling(path, r.id + "-u")
         appendUndo(r, "undo-intent", nil, temp: temp)
-        guard FileManager.default.createFile(atPath: temp, contents: nil, attributes: [.posixPermissions: Int(before.mode)]),
+        // Owner-writable while we fill it (a 0444 original must still undo); the original mode is set afterwards.
+        guard FileManager.default.createFile(atPath: temp, contents: nil, attributes: [.posixPermissions: 0o600]),
               let src = FileHandle(forReadingAtPath: path), let dst = FileHandle(forWritingAtPath: temp) else {
             unlink(temp); appendUndo(r, "undo-failed", "open"); return false
         }
         while let chunk = try? src.read(upToCount: 1 << 20), !chunk.isEmpty { try? dst.write(contentsOf: chunk) }
         try? dst.synchronize(); try? src.close(); try? dst.close()
-        guard Self.setTimes(temp, mtime: before.mtime, birth: before.birth),
+        // Extended attributes (tags, where-from, quarantine) and the ACL; copyfile leaves out the compression xattr.
+        let flags = (DoctorFS.lstat(path)?.st_flags ?? 0) & UInt32(UF_HIDDEN | UF_NODUMP)
+        guard copyfile(path, temp, nil, copyfile_flags_t(COPYFILE_XATTR | COPYFILE_ACL)) == 0,
+              chflags(temp, flags) == 0, chmod(temp, mode_t(before.mode & 0o7777)) == 0,
+              Self.setTimes(temp, mtime: before.mtime, birth: before.birth),
               let s = Self.state(temp), s.sha256 == before.sha256,
               (DoctorFS.lstat(temp)?.st_flags ?? 1) & UInt32(UF_COMPRESSED) == 0,
               rename(temp, path) == 0 else {

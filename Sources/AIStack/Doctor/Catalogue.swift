@@ -81,10 +81,11 @@ struct DoctorGuard {
     func refusal(_ path: String, forWrite: Bool = true) -> String? {
         let real = ((path as NSString).standardizingPath as NSString).resolvingSymlinksInPath
         guard real.hasPrefix(realHome + "/") else { return "outside the home folder" }
-        let rel = String(real.dropFirst(realHome.count + 1))
-        let never = Self.hardNever + (catalogue.neverPaths["macos"] ?? []).map {
+        // Compared lowercased: APFS is case-insensitive by default, so ~/library/mail is ~/Library/Mail.
+        let rel = String(real.dropFirst(realHome.count + 1)).lowercased()
+        let never = (Self.hardNever + (catalogue.neverPaths["macos"] ?? []).map {
             DoctorCatalogue.expand($0, home: realHome).replacingOccurrences(of: realHome + "/", with: "")
-        }
+        }).map { $0.lowercased() }
         for n in never where rel == n || rel.hasPrefix(n + "/") { return "never-list location (\(n))" }
         // A folder that holds a never-list location (e.g. ~/Library/Application Support holds Chrome's profile).
         for n in never where n.hasPrefix(rel + "/") { return "contains a never-list location (\(n))" }

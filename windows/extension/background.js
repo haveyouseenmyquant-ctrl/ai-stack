@@ -439,6 +439,8 @@ async function handle(message, sender) {
       openDoctor(message.checkup);
       return {};
     case 'host': {
+      // Raw helper requests (doctor decisions, settings) come only from our own pages, never from content scripts.
+      if (!sender.url?.startsWith(chrome.runtime.getURL(''))) throw new Error('host requests are for extension pages only');
       const { type, ...payload } = message.request;
       return await call(type, payload, message.timeoutMs || 300000);
     }

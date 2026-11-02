@@ -294,3 +294,12 @@ Meeting Notes on Windows lives in the Chrome extension (popup, side panel and th
 - Removing a rule only stops later auto-approvals. What it already did stays in History with its own Undo.
 - macOS Settings gets **Check Up Now** (shown while the Doctor is on). It runs `DoctorScheduler.runNow()` and opens the report window when done. Windows already had it on the Report tab.
 - Tests: `t_plans_carry_over_and_rules` removes the rule and checks the next checkup runs nothing by rule; `t_extension_page_drives_host` checks the list hides forged rules and Remove works.
+
+## 22. Pre-PR safety review (session 18, 2026-11-02)
+
+An independent read of the executor, plan book, desk and host turned up these, fixed now:
+- **Compression undo on macOS** streamed bytes into a new file, which lost extended attributes (Finder tags, where-from, quarantine), the ACL and the hidden flag, and it failed outright for a read-only (0444) file. Undo now fills an owner-writable temp file, copies xattrs and the ACL with `copyfile(COPYFILE_XATTR | COPYFILE_ACL)` (which leaves out the decmpfs xattr), restores `UF_HIDDEN`/`UF_NODUMP` and the mode, then times, then verifies. New test `t_compress_keeps_metadata` (macOS) fails on the old code.
+- **Never-list letter case (macOS)**: the check now compares lowercased paths. In practice `resolvingSymlinksInPath` already returns the on-disk case for existing paths, so this is defence in depth. `t_never_list_refused` now forges the never-list traps in swapped case on both platforms.
+- **Extension → host**: the service worker forwards raw `host` requests only from the extension's own pages (by `sender.url`), never from content scripts. `doctor.decide` without an explicit `items` list is refused, instead of meaning "every item". Covered in `t_extension_page_drives_host`.
+
+Still open (next): Windows compress/archive copy only the main data stream (alternate streams such as Zone.Identifier and explicit ACLs are lost); `--root ~` runs on the real home with test-mode Trash; an old plan file replayed can reuse an old approval of the same item; carried-over pending items are trusted as written; small check-then-rename races in undo.
