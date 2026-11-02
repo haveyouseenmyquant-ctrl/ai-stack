@@ -69,8 +69,23 @@ jobs:
               print("unpacked", name)
           PY
             ls -l "$db"
-            works
           fi
+          if ! works; then
+            # "fmap_get_hash: error calculating sha2-256 hash" = the bottle's OpenSSL can't hash at all. Try likely
+            # environment causes and keep the first that works (exported for the suite's clamscan).
+            env | grep -i -E 'ssl|crypto' || true
+            otool -L "$(brew --prefix clamav)/lib/libclamav.dylib" | grep -i -E 'ssl|crypto' || true
+            ossl="$(brew --prefix openssl@3)"
+            for try in "OPENSSL_CONF=/dev/null" "OPENSSL_MODULES=$ossl/lib/ossl-modules" "OPENSSL_CONF=$ossl/etc/openssl@3/openssl.cnf" \
+                       "OPENSSL_CONF=/dev/null OPENSSL_MODULES=$ossl/lib/ossl-modules"; do
+              echo "trying: $try"
+              if env $try clamscan --no-summary "$probe/eicar.com"; [ $? -eq 1 ]; then
+                for kv in $try; do echo "$kv" >> "$GITHUB_ENV"; export "$kv"; done
+                break
+              fi
+            done
+          fi
+          works
           echo "verified=true" >> "$GITHUB_OUTPUT"
       - name: Save ClamAV signatures
         if: steps.clamdb.outputs.verified == 'true'
