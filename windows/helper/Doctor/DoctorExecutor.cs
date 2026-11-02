@@ -1,5 +1,7 @@
 using System.IO.Compression;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 
 namespace AIStack.Doctor;
@@ -73,7 +75,7 @@ public class DoctorExecutor
             { MtimeTicks = fi.LastWriteTimeUtc.Ticks, BirthTicks = fi.CreationTimeUtc.Ticks };
     }
 
-    /// NTFS compression into a fresh sibling → copy bytes → restore times and attributes → verify → atomic replace.
+    /// NTFS compression into a fresh sibling → copy bytes, streams and permissions → restore times and attributes → verify → atomic replace.
     /// The original is untouched until the final rename, so a crash leaves it intact (plus at most a temp file).
     (string, long) Compress(Finding f)
     {
@@ -111,7 +113,7 @@ public class DoctorExecutor
         var now = State(path, hash: false);
         if (now == null || now.Size != before.Size || now.Mtime != before.Mtime) return Fail("changed during compression");
         CrashPoint("compress-verified");
-        try { File.Move(temp, path, overwrite: true); } catch (Exception e) { return Fail("rename: " + e.Message); }
+        try { ReplaceWith(temp, path, before); } catch (Exception e) { return Fail("rename: " + e.Message); }
         var freed = (before.Blocks - after.Blocks) * 512;
         var done = rec.Copy(); done.Phase = "done"; done.After = after; done.FreedBytes = freed; done.Ts = DoctorFS.Iso(); done.Temp = null;
         journal.Append(done);
@@ -179,16 +181,38 @@ public class DoctorExecutor
         return true;
     }
 
-    /// Streams the bytes into a new file whose NTFS compression state is set before any data is written.
+    /// Copies the file into a new sibling with everything a plain byte copy drops: CopyFileEx brings the alternate data
+    /// streams (Zone.Identifier, say) and attributes, then the explicit permissions are copied. Compression is then set
+    /// (or cleared) on the copy, which NTFS applies in place to the data already written.
     static void CopyInto(string src, string dst, bool compressed)
     {
-        using (var o = new FileStream(dst, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+        if (!CopyFileEx(src, dst, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, COPY_FILE_FAIL_IF_EXISTS))
+            throw new IOException($"CopyFileEx failed: {Marshal.GetLastWin32Error()}");
+        File.SetAttributes(dst, FileAttributes.Normal);   // read-only would refuse the write handle; callers restore attributes
+        using (var o = new FileStream(dst, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
         {
             SetCompression(o.SafeFileHandle, compressed);
-            using var i = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read);
-            i.CopyTo(o, 1 << 20);
             o.Flush(flushToDisk: true);
         }
+        new FileInfo(dst).SetAccessControl(new FileInfo(src).GetAccessControl(AccessControlSections.Access));
+    }
+
+    /// Named data streams or explicit (non-inherited) permissions: a zip holds neither, so archiving would drop them.
+    static string? ZipLoses(string path, bool dir)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        FileSystemSecurity acl = dir ? new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access)
+                                     : new FileInfo(path).GetAccessControl(AccessControlSections.Access);
+        if (acl.AreAccessRulesProtected || acl.GetAccessRules(true, false, typeof(SecurityIdentifier)).Count > 0) return "its own permissions";
+        var h = FindFirstStreamW(path, 0, out var d, 0);
+        if (h == new IntPtr(-1)) return null;
+        try
+        {
+            do { if (d.cStreamName != "::$DATA") return "an alternate data stream (" + d.cStreamName + ")"; }
+            while (FindNextStreamW(h, out d));
+        }
+        finally { FindClose(h); }
+        return null;
     }
 
     // ---- Archive an opted-in folder
@@ -206,6 +230,9 @@ public class DoctorExecutor
         if (Manifest(path) is not { } manifest) { Log(f, "skipped", "contains links or unreadable files"); return ("skipped", 0); }
         if (manifest.FirstOrDefault(e => !e.Dir && IsOpen(Join(path, e.Rel))) is { } open)
         { Log(f, "skipped", open.Rel + " is open in another process"); return ("skipped", 0); }
+        foreach (var e in manifest)
+            if (ZipLoses(Join(path, e.Rel), e.Dir) is string lost)
+            { Log(f, "skipped", (e.Rel.Length == 0 ? "the folder" : e.Rel) + " has " + lost + ", which a zip can't keep"); return ("skipped", 0); }
         var id = DoctorJournal.NewId();
         var tag = ArchiveTag(path, id);
         string temp = tag + ".zip", check = tag + "-v", aside = tag + "-d";
@@ -434,7 +461,7 @@ public class DoctorExecutor
             File.SetAttributes(temp, (FileAttributes)before.Mode & ~FileAttributes.Compressed);
             var s = State(temp);
             if (s == null || s.Sha256 != before.Sha256 || DoctorFS.IsCompressed(temp)) throw new IOException("verify");
-            File.Move(temp, path, overwrite: true);
+            ReplaceWith(temp, path, before);
         }
         catch (Exception e)
         {
@@ -480,7 +507,11 @@ public class DoctorExecutor
             if (r.Action == DoctorAction.EvictCloud) { RecoverEvict(r); n++; continue; }
             if (r.Temp is not string temp) continue;
             if (r.Action == DoctorAction.ArchiveFolder) { RecoverArchive(r, records); n++; continue; }
-            if (r.From is string orig && File.Exists(orig)) { try { File.Delete(temp); } catch { } }
+            if (r.From is string orig && File.Exists(orig))
+            {
+                try { File.Delete(temp); } catch { }
+                if (r.Before is FileState b) try { File.SetAttributes(orig, (FileAttributes)b.Mode); } catch { }   // read-only, if ReplaceWith cleared it
+            }
             else if (r.From is string o2 && File.Exists(temp)) File.Move(temp, o2);   // never expected, but never leave it missing
             var e = r.Copy(); e.Phase = r.Phase == "intent" ? "failed" : "undo-failed"; e.Reason = "interrupted; recovered"; e.Ts = DoctorFS.Iso();
             journal.Append(e);
@@ -587,6 +618,20 @@ public class DoctorExecutor
     public static string TempSibling(string path, string id) =>
         Path.Combine(Path.GetDirectoryName(path)!, "." + Path.GetFileName(path) + ".ld-" + id[..8]);
 
+    /// Renames the verified copy over the original. Windows won't replace a read-only file, so that bit is cleared just
+    /// before (the copy already carries it); on failure, or after a crash (Recover), the original gets its attributes back.
+    static void ReplaceWith(string temp, string path, FileState before)
+    {
+        var ro = (File.GetAttributes(path) & FileAttributes.ReadOnly) != 0;
+        if (ro) File.SetAttributes(path, File.GetAttributes(path) & ~FileAttributes.ReadOnly);
+        try { File.Move(temp, path, overwrite: true); }
+        catch
+        {
+            if (ro) try { File.SetAttributes(path, (FileAttributes)before.Mode); } catch { }
+            throw;
+        }
+    }
+
     static void SetTimes(string path, FileState s)
     {
         File.SetCreationTimeUtc(path, s.BirthUtc);
@@ -610,6 +655,27 @@ public class DoctorExecutor
         if (!DeviceIoControl(h, FSCTL_SET_COMPRESSION, ref format, sizeof(short), IntPtr.Zero, 0, out _, IntPtr.Zero))
             throw new IOException($"FSCTL_SET_COMPRESSION failed: {Marshal.GetLastWin32Error()}");
     }
+
+    const uint COPY_FILE_FAIL_IF_EXISTS = 0x1;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CopyFileEx(string src, string dst, IntPtr progress, IntPtr data, IntPtr cancel, uint flags);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct WIN32_FIND_STREAM_DATA
+    {
+        public long StreamSize;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 296)] public string cStreamName;   // MAX_PATH + 36
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr FindFirstStreamW(string path, int level, out WIN32_FIND_STREAM_DATA data, uint flags);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool FindNextStreamW(IntPtr h, out WIN32_FIND_STREAM_DATA data);
+
+    [DllImport("kernel32.dll")]
+    static extern bool FindClose(IntPtr h);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool DeviceIoControl(SafeFileHandle h, uint code, ref short inBuf, int inSize, IntPtr outBuf, int outSize,

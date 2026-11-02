@@ -193,13 +193,51 @@ def t_tier1_roundtrip(c, res):
     assert not leftovers(home), f"temp files left: {leftovers(home)}"
 
 
+def win_meta(p, i=None):
+    """Windows: the Zone.Identifier stream, explicit permissions and attributes; with i, plant them first."""
+    zone = p + ":Zone.Identifier"
+    if i is not None:
+        t = os.lstat(p)
+        open(zone, "w").write("[ZoneTransfer]\nZoneId=3\n")
+        subprocess.run(["icacls", p, "/grant", "*S-1-1-0:(R)"], check=True, capture_output=True)
+        os.utime(p, ns=(t.st_atime_ns, t.st_mtime_ns))   # stays cold, so the next checkup compresses it again
+        flags = (["+R"] if i % 2 == 0 else []) + (["+H"] if i % 3 == 0 else [])
+        if flags:
+            subprocess.run(["attrib", *flags, p], check=True, capture_output=True)
+    try:
+        ads = open(zone, "rb").read()
+    except OSError:
+        ads = None
+    acl = subprocess.run(["icacls", p], capture_output=True, text=True).stdout.replace(p, "")
+    explicit = sorted(l.strip() for l in acl.splitlines() if l.strip() and "(I)" not in l and "Successfully" not in l)
+    keep = ~(stat.FILE_ATTRIBUTE_COMPRESSED | stat.FILE_ATTRIBUTE_ARCHIVE)
+    return ads, explicit, os.lstat(p).st_file_attributes & keep
+
+
 def t_compress_keeps_metadata(c, res):
-    """macOS: compress + undo keep extended attributes, flags and mode, and a read-only file still undoes."""
+    """Compress + undo keep extended attributes, flags and mode (macOS) or alternate data streams, explicit permissions
+    and attributes (Windows), and a read-only file still undoes."""
     home, exp, j, out = c.fixture()
     c.doctor("tier1", "--root", home, "--journal", j)
     targets = compressed_files(home)
     c.doctor("undo", "--root", home, "--journal", j)
     assert targets, "nothing was compressed"
+    if WINDOWS:
+        for i, p in enumerate(targets):
+            win_meta(p, i)
+        before, m0 = snapshot(home), {p: win_meta(p) for p in targets}
+        assert all(m[0] and m[1] for m in m0.values()), f"planting failed: {list(m0.values())[:1]}"
+        j2 = j + ".2"
+        c.doctor("tier1", "--root", home, "--journal", j2)
+        assert compressed_files(home), "nothing was compressed the second time"
+        mid = {p: win_meta(p) for p in targets}
+        assert mid == m0, f"compress changed metadata: {[(p, m0[p], mid[p]) for p in targets if mid[p] != m0[p]][:2]}"
+        c.doctor("undo", "--root", home, "--journal", j2)
+        after = {p: win_meta(p) for p in targets}
+        assert after == m0, f"undo changed metadata: {[(p, m0[p], after[p]) for p in targets if after[p] != m0[p]][:2]}"
+        assert not compressed_files(home), f"still compressed after undo: {compressed_files(home)[:3]}"
+        assert not diff(before, snapshot(home), "all"), "undo did not restore bytes and times"
+        return
     import ctypes
     libc = ctypes.CDLL(None, use_errno=True)   # Python has no os.*xattr on macOS; options 0x1 = XATTR_NOFOLLOW
     def xattrs(p):
@@ -410,6 +448,19 @@ def t_archive_refuses_changed_or_odd_folders(c, res):
     open(folder + ".zip", "wb").write(b"user's own zip")
     c.doctor("tier1", "--root", home, "--journal", j, "--archive", ARCHIVE)
     assert os.path.isdir(folder) and open(folder + ".zip", "rb").read() == b"user's own zip", "overwrote an existing zip"
+    if WINDOWS:   # a zip can't hold alternate data streams or explicit permissions, so such folders stay as they are
+        os.remove(folder + ".zip")
+        f = next(os.path.join(r, n) for r, _, ns in os.walk(folder) for n in ns)
+        t = os.lstat(f)
+        open(f + ":Zone.Identifier", "w").write("[ZoneTransfer]\nZoneId=3\n")
+        os.utime(f, ns=(t.st_atime_ns, t.st_mtime_ns))
+        c.doctor("tier1", "--root", home, "--journal", j, "--archive", ARCHIVE)
+        assert os.path.isdir(folder) and not os.path.exists(folder + ".zip"), "archived a folder holding an alternate data stream"
+        assert open(f + ":Zone.Identifier").read().startswith("[ZoneTransfer]"), "the stream was lost"
+        os.remove(f + ":Zone.Identifier")
+        subprocess.run(["icacls", folder, "/grant", "*S-1-1-0:(R)"], check=True, capture_output=True)
+        c.doctor("tier1", "--root", home, "--journal", j, "--archive", ARCHIVE)
+        assert os.path.isdir(folder) and not os.path.exists(folder + ".zip"), "archived a folder with its own permissions"
     now = snapshot(home)
     assert all(now[k][0] == v[0] for k, v in before.items() if k.startswith(ARCHIVE + "/")), "archive folder bytes changed"
 
@@ -878,7 +929,7 @@ def planted(c, res):
 
 SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_archive_refuses_changed_or_odd_folders,
           t_crash_points_compress if WINDOWS else t_quarantine_roundtrip_and_crash_points,
-          *([] if WINDOWS else [t_compress_keeps_metadata]),
+          t_compress_keeps_metadata,
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_old_approval_does_not_carry_over, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
           t_writes_need_root, t_summary_sends_no_user_names, t_checkup_respects_switches, t_schedule_once_per_slot,
