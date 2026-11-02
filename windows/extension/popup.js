@@ -80,6 +80,7 @@ $('notepad').addEventListener('click', async () => {
   window.close();
 });
 $('library').addEventListener('click', () => { AIS.message({ type: 'openNotes' }); window.close(); });
+$('doctor').addEventListener('click', () => { AIS.message({ type: 'openDoctor' }); window.close(); });
 $('test').addEventListener('click', async () => {
   $('test').disabled = true;
   $('testResult').textContent = 'Checking “I has a apple.”…';

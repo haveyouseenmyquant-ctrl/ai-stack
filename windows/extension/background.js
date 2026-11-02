@@ -135,6 +135,35 @@ function onHostMessage(message) {
   }
   if (message.event === 'segment') broadcast({ type: 'segment', meetingId: message.meetingId, segment: message.segment });
   if (message.event === 'meeting') onMeetingEvent(message.meeting);
+  if (message.event === 'doctor-checkup') onDoctorCheckup(message);
+}
+
+// ---------------------------------------------------------------------------
+// Laptop Doctor: the helper runs the weekly checkup; at most one notification a day, only when there's a plan.
+
+function onDoctorCheckup(message) {
+  broadcast({ type: 'doctor-checkup', ...message });
+  if (!message.notify) return;
+  const gb = (message.planBytes / 1e9).toFixed(1);
+  chrome.notifications.create(`doctor:${message.checkup}`, {
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title: 'Laptop Doctor checkup',
+    message: `${message.planItems} suggestion${message.planItems === 1 ? '' : 's'} (${gb} GB) wait for your OK. Nothing is removed until you approve.`,
+  });
+}
+
+function openDoctor(checkup) {
+  const base = chrome.runtime.getURL('doctor.html');
+  const url = checkup ? `${base}#${encodeURIComponent(checkup)}` : base;
+  chrome.tabs.query({ url: `${base}*` }).then((tabs) => {
+    if (tabs.length) {
+      chrome.tabs.update(tabs[0].id, { active: true, url });
+      chrome.windows.update(tabs[0].windowId, { focused: true });
+    } else {
+      chrome.tabs.create({ url });
+    }
+  });
 }
 
 function broadcast(message) {
@@ -348,6 +377,7 @@ chrome.notifications.onButtonClicked.addListener((id, index) => {
 
 chrome.notifications.onClicked.addListener((id) => {
   if (id.startsWith('ready:')) openNotes(id.slice(6));
+  else if (id.startsWith('doctor:')) openDoctor(id.slice(7));
   else if (id === 'recording') openNotepad(live?.tabId);
   chrome.notifications.clear(id);
 });
@@ -405,6 +435,9 @@ async function handle(message, sender) {
     case 'openNotes':
       openNotes(message.meetingId);
       return {};
+    case 'openDoctor':
+      openDoctor(message.checkup);
+      return {};
     case 'host': {
       const { type, ...payload } = message.request;
       return await call(type, payload, message.timeoutMs || 300000);
@@ -415,7 +448,7 @@ async function handle(message, sender) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || typeof message.type !== 'string' || ['segment', 'status-changed', 'meeting-changed'].includes(message.type)) return false;
+  if (!message || typeof message.type !== 'string' || ['segment', 'status-changed', 'meeting-changed', 'doctor-checkup'].includes(message.type)) return false;
   handle(message, sender)
     .then((result) => sendResponse({ ok: true, ...result }))
     .catch((error) => sendResponse({ ok: false, error: error.message }));

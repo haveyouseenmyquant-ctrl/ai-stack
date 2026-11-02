@@ -645,6 +645,71 @@ def t_report_window_decisions(c, res):
     assert all(e["undone"] and not e["canUndo"] for hc in h for e in hc["entries"] if hc["checkup"] == p["checkup"]), "undone entries still undoable"
 
 
+class HostPipe:
+    """Chrome's side of native messaging: 4-byte little-endian length + UTF-8 JSON. Events (no id) are kept apart."""
+    def __init__(self, binary, env):
+        self.p = subprocess.Popen([binary, "--host"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+        self.n, self.events = 0, []
+
+    def call(self, type_, **payload):
+        self.n += 1
+        body = json.dumps({"id": self.n, "type": type_, **payload}).encode()
+        self.p.stdin.write(len(body).to_bytes(4, "little") + body)
+        self.p.stdin.flush()
+        while True:
+            head = self.p.stdout.read(4)
+            assert len(head) == 4, f"host closed the pipe during {type_}"
+            m = json.loads(self.p.stdout.read(int.from_bytes(head, "little")))
+            if m.get("id") == self.n:
+                return m
+            self.events.append(m)
+
+    def close(self):
+        self.p.stdin.close()
+        try:
+            self.p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
+
+
+def t_extension_page_drives_host(c, res):
+    """Windows: what doctor.html sends to the native host. Settings clamp thresholds and switching on waits for the
+    next slot; "Check up now" with every switch off changes no file; approve runs only the ticked items, once;
+    a bad checkup id is refused; History undoes the checkup."""
+    home, exp, j, out = c.fixture()
+    data = os.path.join(out, "doctor-data")
+    h = HostPipe(c.bin, merged({"AISTACK_DOCTOR_HOME": home, "AISTACK_DOCTOR_DATA": data}))
+    try:
+        s = h.call("doctor.settings")
+        assert s["ok"] and not s["settings"]["enabled"], f"Doctor not off by default: {s}"
+        want = dict(s["settings"], enabled=True, compress=False, evictCloud=False, archive=False, thresholds={"coldDays": 1, "bogus": 3})
+        s = h.call("doctor.settings.set", settings=want)["settings"]
+        assert s["thresholds"] == {"coldDays": 7} and s["lastRun"], f"settings not sanitised: {s}"
+        before = snapshot(home, skip_trash=True)
+        r = h.call("doctor.checkNow", wait=True)
+        assert r["ok"] and r["result"]["tier1"]["done"] == 0, f"checkup with switches off: {r}"
+        assert not diff(before, snapshot(home, skip_trash=True), "hash"), "checkup with every switch off changed files"
+        ups = h.call("doctor.checkups")["checkups"]
+        assert len(ups) == 1, f"checkups: {ups}"
+        cid = ups[0]["checkup"]
+        g = h.call("doctor.get", checkup=cid)
+        assert g["ok"] and not g["decided"] and g["plan"]["groups"], f"get: {g}"
+        cache = [i["id"] for grp in g["plan"]["groups"] for i in grp["items"] if i["category"] == "cache"]
+        assert cache, "fixture lacks cache items"
+        o = h.call("doctor.decide", checkup=cid, decision="approve", items=cache)
+        assert o["ok"] and o["result"]["outcome"]["done"] == len(cache), f"approve: {o}"
+        assert h.call("doctor.decide", checkup=cid, decision="approve", items=cache)["result"]["decided"] == 0, "approved twice"
+        assert set(h.call("doctor.get", checkup=cid)["decided"]) == set(cache), "decided items not reported"
+        assert not h.call("doctor.get", checkup="../../x")["ok"], "a path-like checkup id was accepted"
+        hist = [e for hc in h.call("doctor.history")["history"] for e in hc["entries"]]
+        assert len(hist) == len(cache) and all(e["canUndo"] for e in hist), f"history: {hist}"
+        assert h.call("doctor.undoCheckup", checkup=cid)["ok"], "undo failed"
+        assert not diff(before, snapshot(home, skip_trash=True), "hash"), "undo of the checkup did not restore everything"
+    finally:
+        h.close()
+    c.journals.append(os.path.join(data, "journal.jsonl"))
+
+
 def t_schedule_once_per_slot(c, res):
     """Weekly slot Sunday 11:00 UTC (2026-11-01 is a Sunday); at most one approval request a day."""
     def due(now, last=None, notified=None):
@@ -702,7 +767,7 @@ SAFETY = [t_tier1_roundtrip, t_kill_during_tier1, t_crash_points_archive, t_arch
           t_changed_between_plan_and_execute, t_no_approval_no_action,
           t_approval_for_other_item_does_not_count, t_rules_cannot_approve_lossy, t_never_list_refused, t_traps_untouched,
           t_writes_need_root, t_summary_sends_no_user_names, t_checkup_respects_switches, t_schedule_once_per_slot,
-          t_plans_carry_over_and_rules] + ([t_evict_cloud_roundtrip] if WINDOWS else []) + [t_report_window_decisions]
+          t_plans_carry_over_and_rules] + ([t_evict_cloud_roundtrip] if WINDOWS else []) + [t_report_window_decisions] + ([t_extension_page_drives_host] if WINDOWS else [])
 
 
 def main():

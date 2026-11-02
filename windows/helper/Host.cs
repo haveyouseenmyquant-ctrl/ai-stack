@@ -13,16 +13,19 @@ sealed class NativeHost
     readonly SemaphoreSlim writeLock = new(1, 1);
     readonly MeetingStore store = new();
     readonly MeetingRecorder recorder;
+    readonly Doctor.DoctorService doctor;
 
     public NativeHost()
     {
         recorder = new MeetingRecorder(store, Emit);
+        doctor = new Doctor.DoctorService(Emit);
     }
 
     public async Task RunAsync()
     {
         Log.Info($"Host started (pid {Environment.ProcessId})");
         _ = Task.Run(recorder.RecoverInterruptedAsync);
+        doctor.Start();
         while (true)
         {
             var message = await ReadAsync();
@@ -108,6 +111,7 @@ sealed class NativeHost
 
     async Task<JsonObject> DispatchAsync(string type, JsonObject m)
     {
+        if (type.StartsWith("doctor.")) return await doctor.DispatchAsync(type, m);
         switch (type)
         {
             case "ping":
