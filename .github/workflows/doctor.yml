@@ -33,27 +33,42 @@ jobs:
           path: /opt/homebrew/var/lib/clamav
           key: clamav-db-${{ github.run_id }}
           restore-keys: clamav-db-
-      # A restored DB can fail clamscan's signature check ("Can't load daily.info: Malformed database"), so the DB
-      # must detect EICAR before it is used or cached; otherwise it is downloaded again from scratch.
+      # Homebrew's ClamAV 1.5.4 bottle rejects the signature of every published CVD ("cli_loadinfo: Incorrect digital
+      # signature" for main.cvd too; freshclam: "NULL X509 store"), so no packed database loads. The CVDs are a 512-byte
+      # header plus a tarball of plain signature files, and clamscan loads plain files without the signature check:
+      # freshclam downloads them (TestDatabases off, so it keeps them), then they are unpacked in place. Same
+      # signatures, nothing hand-written. The DB must detect EICAR before it is used or cached.
       - name: Update ClamAV signatures
         id: clamdb
         continue-on-error: true
         timeout-minutes: 10
         run: |
           db="$(brew --prefix)/var/lib/clamav"
+          echo "TestDatabases no" >> "$(brew --prefix)/etc/clamav/freshclam.conf"
           probe="$RUNNER_TEMP/clamprobe"; mkdir -p "$probe"
           printf '%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > "$probe/eicar.com"
           works() { local r=0; clamscan --no-summary "$probe/eicar.com" || r=$?; [ "$r" -eq 1 ]; }
-          freshclam --stdout || true
           if ! works; then
-            echo "restored DB does not detect EICAR; downloading it again"
-            rm -f "$db"/daily.*; freshclam --stdout || true
-          fi
-          if ! works; then
-            # The published daily.cvd itself can fail its signature test (daily 28171 on 2026-11-02); then scan
-            # with main.cvd alone, which still holds the EICAR signature.
-            echo "daily.cvd is broken upstream; using main.cvd only"
-            rm -f "$db"/daily.*
+            rm -rf "${db:?}"/*
+            freshclam --stdout || true
+            ls -l "$db"
+            python3 -I - "$db" <<'PY'
+          import glob, io, os, sys, tarfile
+          db = sys.argv[1]
+          for p in glob.glob(os.path.join(db, "*.cvd")) + glob.glob(os.path.join(db, "*.cld")):
+              name = os.path.basename(p)
+              if name.startswith("bytecode."):  # unsigned bytecode needs --bytecode-unsigned; EICAR doesn't need it
+                  os.remove(p); continue
+              with open(p, "rb") as f:
+                  f.seek(512)
+                  with tarfile.open(fileobj=io.BytesIO(f.read()), mode="r:*") as t:
+                      for m in t.getmembers():
+                          if m.isfile() and not m.name.endswith(".info") and "/" not in m.name:
+                              t.extract(m, db, filter="data")
+              os.remove(p)
+              print("unpacked", name)
+          PY
+            ls -l "$db"
             works
           fi
           echo "verified=true" >> "$GITHUB_OUTPUT"
